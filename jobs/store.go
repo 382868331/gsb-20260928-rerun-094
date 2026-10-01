@@ -117,6 +117,31 @@ func (s *Store) Mutate(id string, fn func(*Job, *[]*Attempt) error) (*Job, []*At
 	return result, resultAttempts, err
 }
 
+// MutateGraph works like Mutate but also exposes the full job map so the
+// callback can resolve dependencies atomically inside the same transaction.
+func (s *Store) MutateGraph(id string, fn func(job *Job, attempts *[]*Attempt, all map[string]*Job) error) (*Job, []*Attempt, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var result *Job
+	var resultAttempts []*Attempt
+	err := s.withLock(func(snap *snapshot) error {
+		job, ok := snap.Jobs[id]
+		if !ok {
+			return ErrNotFound
+		}
+		attempts := copyAttempts(snap.Attempts[id])
+		if err := fn(job, &attempts, snap.Jobs); err != nil {
+			return err
+		}
+		snap.Attempts[id] = attempts
+		jobCopy := *job
+		result = &jobCopy
+		resultAttempts = copyAttempts(attempts)
+		return nil
+	})
+	return result, resultAttempts, err
+}
+
 func (s *Store) withLock(fn func(*snapshot) error) error {
 	lock, err := os.OpenFile(s.path+".lock", os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {

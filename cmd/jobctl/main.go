@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"background-jobs/jobs"
@@ -27,6 +28,8 @@ func run(args []string) error {
 	}
 	fs := flag.NewFlagSet(args[0], flag.ContinueOnError)
 	storePath := fs.String("store", "data/jobs.json", "job state file")
+	dependsOn := fs.String("depends-on", "", "comma-separated predecessor job IDs (enqueue)")
+	group := fs.String("group", "", "group name for batch cancel (enqueue)")
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
 	}
@@ -40,7 +43,7 @@ func run(args []string) error {
 		}
 	case "enqueue":
 		if len(rest) < 1 {
-			return fmt.Errorf("usage: jobctl enqueue [--store file] <type> [payload] [max-attempts]")
+			return fmt.Errorf("usage: jobctl enqueue [--store file] [--depends-on id1,id2] [--group name] <type> [payload] [max-attempts]")
 		}
 		payload := ""
 		maxAttempts := 3
@@ -57,11 +60,32 @@ func run(args []string) error {
 			return err
 		}
 		defer store.Close()
-		job, err := jobs.NewManager(store, registry).Enqueue(rest[0], payload, maxAttempts)
+		var opts []jobs.EnqueueOption
+		if *dependsOn != "" {
+			opts = append(opts, jobs.WithDependencies(strings.Split(*dependsOn, ",")...))
+		}
+		if *group != "" {
+			opts = append(opts, jobs.WithGroup(*group))
+		}
+		job, err := jobs.NewManager(store, registry).Enqueue(rest[0], payload, maxAttempts, opts...)
 		if err != nil {
 			return err
 		}
 		fmt.Println(job.ID)
+	case "cancel-group":
+		if len(rest) != 1 {
+			return fmt.Errorf("usage: jobctl cancel-group [--store file] <group-name>")
+		}
+		store, err := jobs.OpenStore(*storePath)
+		if err != nil {
+			return err
+		}
+		defer store.Close()
+		canceled, err := jobs.NewManager(store, registry).CancelGroup(rest[0])
+		if err != nil {
+			return err
+		}
+		return printJSON(canceled)
 	case "list":
 		store, err := jobs.OpenStore(*storePath)
 		if err != nil {
@@ -148,5 +172,5 @@ func printJSON(value any) error {
 }
 
 func usage() {
-	fmt.Println(`commands: types, enqueue, list, show, cancel, recover, worker`)
+	fmt.Println(`commands: types, enqueue, list, show, cancel, cancel-group, recover, worker`)
 }

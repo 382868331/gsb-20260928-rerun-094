@@ -12,6 +12,11 @@ var (
 	ErrTerminal     = errors.New("job is terminal")
 )
 
+var (
+	ErrUnknownDependency = errors.New("unknown dependency")
+	ErrDependencyFailed  = errors.New("dependency did not succeed")
+)
+
 type Manager struct {
 	store    *Store
 	registry *Registry
@@ -26,7 +31,26 @@ func NewManager(store *Store, registry *Registry) *Manager {
 	return &Manager{store: store, registry: registry, now: nowTime}
 }
 
-func (m *Manager) Enqueue(typ, payload string, maxAttempts int) (*Job, error) {
+type EnqueueOption func(*Job)
+
+func WithDependencies(ids ...string) EnqueueOption {
+	return func(job *Job) {
+		seen := map[string]bool{}
+		for _, id := range ids {
+			if id == "" || seen[id] {
+				continue
+			}
+			seen[id] = true
+			job.DependsOn = append(job.DependsOn, id)
+		}
+	}
+}
+
+func WithGroup(groupID string) EnqueueOption {
+	return func(job *Job) { job.GroupID = groupID }
+}
+
+func (m *Manager) Enqueue(typ, payload string, maxAttempts int, opts ...EnqueueOption) (*Job, error) {
 	def, ok := m.registry.Get(typ)
 	if !ok {
 		return nil, fmt.Errorf("%w: %s", ErrUnknownType, typ)
@@ -43,6 +67,18 @@ func (m *Manager) Enqueue(typ, payload string, maxAttempts int) (*Job, error) {
 		MaxAttempts: maxAttempts,
 		CreatedAt:   now,
 		UpdatedAt:   now,
+	}
+	for _, opt := range opts {
+		opt(job)
+	}
+	for _, depID := range job.DependsOn {
+		dep, _, err := m.store.Get(depID)
+		if err != nil {
+			return nil, fmt.Errorf("%w: %s", ErrUnknownDependency, depID)
+		}
+		if dep.Status == StatusFailed || dep.Status == StatusCanceled {
+			return nil, fmt.Errorf("%w: %s is %s", ErrDependencyFailed, depID, dep.Status)
+		}
 	}
 	return job, m.store.Create(job)
 }
@@ -63,8 +99,19 @@ func (m *Manager) Claim() (*Job, *Attempt, error) {
 		if candidate.Status != StatusPending || (candidate.NextRunAt != nil && candidate.NextRunAt.After(now)) {
 			continue
 		}
-		claimed, attempts, err := m.store.Mutate(candidate.ID, func(job *Job, list *[]*Attempt) error {
+		claimed, attempts, err := m.store.MutateGraph(candidate.ID, func(job *Job, list *[]*Attempt, all map[string]*Job) error {
 			if job.Status != StatusPending || (job.NextRunAt != nil && job.NextRunAt.After(now)) {
+				return nil
+			}
+			depResults, ready, blocked := resolveDependencies(job, all)
+			if blocked != "" {
+				job.Status = StatusCanceled
+				job.Error = blocked
+				job.NextRunAt = nil
+				job.UpdatedAt = now
+				return nil
+			}
+			if !ready {
 				return nil
 			}
 			job.AttemptCount++
@@ -73,7 +120,7 @@ func (m *Manager) Claim() (*Job, *Attempt, error) {
 			job.NextRunAt = nil
 			job.Error = ""
 			job.UpdatedAt = now
-			*list = append(*list, &Attempt{Number: job.AttemptCount, Status: AttemptRunning, StartedAt: now})
+			*list = append(*list, &Attempt{Number: job.AttemptCount, Status: AttemptRunning, StartedAt: now, DepResults: depResults})
 			return nil
 		})
 		if err != nil {
@@ -84,6 +131,32 @@ func (m *Manager) Claim() (*Job, *Attempt, error) {
 		}
 	}
 	return nil, nil, nil
+}
+
+// resolveDependencies inspects a pending job's dependencies. It returns the
+// confirmed results of succeeded predecessors once every dependency has
+// succeeded. A dependency that failed or was canceled permanently blocks the
+// job, reported as a non-empty blocked reason.
+func resolveDependencies(job *Job, all map[string]*Job) (map[string]string, bool, string) {
+	if len(job.DependsOn) == 0 {
+		return nil, true, ""
+	}
+	results := make(map[string]string, len(job.DependsOn))
+	for _, depID := range job.DependsOn {
+		dep, ok := all[depID]
+		if !ok {
+			return nil, false, fmt.Sprintf("%s: %s is missing", ErrDependencyFailed, depID)
+		}
+		switch dep.Status {
+		case StatusSucceeded:
+			results[depID] = dep.Result
+		case StatusFailed, StatusCanceled:
+			return nil, false, fmt.Sprintf("%s: %s is %s", ErrDependencyFailed, depID, dep.Status)
+		default:
+			return nil, false, ""
+		}
+	}
+	return results, true, ""
 }
 
 func (m *Manager) Complete(jobID string, attempt int, result string, execErr error) (*Job, error) {
@@ -156,6 +229,31 @@ func (m *Manager) Cancel(jobID string) (*Job, error) {
 		return nil
 	})
 	return job, err
+}
+
+// CancelGroup cancels every non-terminal job in a group. Jobs that already
+// reached a terminal state keep their records untouched; running jobs get an
+// independent CANCELED terminal state for their in-flight attempt.
+func (m *Manager) CancelGroup(groupID string) ([]*Job, error) {
+	all, err := m.store.List()
+	if err != nil {
+		return nil, err
+	}
+	var canceled []*Job
+	for _, job := range all {
+		if job.GroupID != groupID {
+			continue
+		}
+		updated, err := m.Cancel(job.ID)
+		if errors.Is(err, ErrTerminal) {
+			continue
+		}
+		if err != nil {
+			return canceled, err
+		}
+		canceled = append(canceled, updated)
+	}
+	return canceled, nil
 }
 
 func (m *Manager) RecoverInterrupted() ([]string, error) {

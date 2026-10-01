@@ -34,6 +34,8 @@ type Job struct {
 	MaxAttempts    int        `json:"max_attempts"`
 	AttemptCount   int        `json:"attempt_count"`
 	CurrentAttempt int        `json:"current_attempt,omitempty"`
+	DependsOn      []string   `json:"depends_on,omitempty"`
+	GroupID        string     `json:"group_id,omitempty"`
 	Result         string     `json:"result,omitempty"`
 	Error          string     `json:"error,omitempty"`
 	NextRunAt      *time.Time `json:"next_run_at,omitempty"`
@@ -42,18 +44,20 @@ type Job struct {
 }
 
 type Attempt struct {
-	Number     int           `json:"number"`
-	Status     AttemptStatus `json:"status"`
-	StartedAt  time.Time     `json:"started_at"`
-	FinishedAt *time.Time    `json:"finished_at,omitempty"`
-	Result     string        `json:"result,omitempty"`
-	Error      string        `json:"error,omitempty"`
+	Number     int               `json:"number"`
+	Status     AttemptStatus     `json:"status"`
+	StartedAt  time.Time         `json:"started_at"`
+	FinishedAt *time.Time        `json:"finished_at,omitempty"`
+	Result     string            `json:"result,omitempty"`
+	Error      string            `json:"error,omitempty"`
+	DepResults map[string]string `json:"dep_results,omitempty"`
 }
 
 type Input struct {
-	JobID   string
-	Attempt int
-	Payload string
+	JobID      string
+	Attempt    int
+	Payload    string
+	DepResults map[string]string
 }
 
 type Definition struct {

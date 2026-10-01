@@ -17,6 +17,23 @@ Go 实现的本地后台作业平台，包含作业定义、运行实例、持�
 - `SafeToRetry: false` 的普通失败不重试；确认前崩溃会直接标记 `FAILED`，避免对可能已执行的外部操作重复扣费或重复提交。
 - 新增作业类型只需要注册 `Definition`，不需要修改状态流转。
 
+## 作业依赖与结果接续
+
+`enqueue --depends-on id1,id2` 声明前置作业，构成有向无环图（依赖必须在提交时已存在，因此天然无环）。
+
+- 后继作业只有在全部前置 `SUCCEEDED` 后才会被派发；派发时把已确认成功的前置结果以 `Input.DepResults`（前置作业 ID -> result）交给任务，实现部分结果接续。
+- 任一前置 `FAILED` 或 `CANCELED` 时，后继直接转为 `CANCELED` 并记录原因，不会消费未确认的产物。
+- 前置因工作者失联而结果不确定（`SafeToRetry: false` 被 `recover` 标记失败）时，后继同样被阻断：必须先人工核实外部副作用，平台不会按普通失败自动重做可能有外部影响的步骤。
+- 前置重试只是同一作业的第 N 次尝试，尝试记录挂在原作业下，不会生成新的业务作业；依赖始终引用作业 ID，重启后恢复同一张关系图。
+
+## 分组取消
+
+`enqueue --group 名称` 把作业归入一组，`cancel-group <名称>` 取消整组：
+
+- 已经完成的作业（`SUCCEEDED`/`FAILED`）记录与结果原样保留。
+- 仍在执行的任务获得独立终态：当前尝试标记为 `CANCELED` 并写入完成时间，迟到结果依旧被拒绝。
+- 组外作业不受影响；组内后继若因前置被取消而阻断，同样按依赖失败规则终止。
+
 ## 持久化与取消
 
 状态默认写入 `data/jobs.json`，每次事务通过同目录锁文件串行化，并以临时文件原子替换。工作者启动时会把上次遗留的 `RUNNING` 尝试标记为 `INTERRUPTED`，再按任务的安全重试策略恢复；已经完成的作业和结果保留不变。
@@ -29,10 +46,12 @@ Go 实现的本地后台作业平台，包含作业定义、运行实例、持�
 go run ./cmd/jobctl types
 go run ./cmd/jobctl enqueue echo hello
 go run ./cmd/jobctl enqueue flaky demo 3
+go run ./cmd/jobctl enqueue --depends-on <job-id> --group pipeline echo next
 timeout 2s go run ./cmd/jobctl worker
 go run ./cmd/jobctl list
 go run ./cmd/jobctl show <job-id>
 go run ./cmd/jobctl cancel <job-id>
+go run ./cmd/jobctl cancel-group pipeline
 go run ./cmd/jobctl recover
 ```
 
