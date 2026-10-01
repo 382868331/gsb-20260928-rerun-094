@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -82,6 +83,22 @@ func BuiltinRegistry() *Registry {
 					return "", fmt.Errorf("temporary failure on first attempt")
 				}
 				return "ok after retry: " + in.Payload, nil
+			},
+		},
+		Definition{
+			Type:        "collect",
+			SafeToRetry: true,
+			Execute: func(_ context.Context, in Input) (string, error) {
+				ids := make([]string, 0, len(in.Deps))
+				for id := range in.Deps {
+					ids = append(ids, id)
+				}
+				sort.Strings(ids)
+				parts := make([]string, 0, len(ids))
+				for _, id := range ids {
+					parts = append(parts, id+"="+in.Deps[id])
+				}
+				return strings.Join(parts, "; "), nil
 			},
 		},
 		Definition{

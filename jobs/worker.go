@@ -66,7 +66,7 @@ func (w *Worker) runAttempt(parent context.Context, job *Job, attempt *Attempt) 
 			}
 		}
 	}()
-	result, err := def.Execute(ctx, Input{JobID: job.ID, Attempt: attempt.Number, Payload: job.Payload})
+	result, err := def.Execute(ctx, Input{JobID: job.ID, Attempt: attempt.Number, Payload: job.Payload, Deps: job.DepResults})
 	if ctx.Err() != nil {
 		return
 	}

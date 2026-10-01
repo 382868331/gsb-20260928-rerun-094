@@ -27,6 +27,9 @@ func run(args []string) error {
 	}
 	fs := flag.NewFlagSet(args[0], flag.ContinueOnError)
 	storePath := fs.String("store", "data/jobs.json", "job state file")
+	var deps stringList
+	fs.Var(&deps, "dep", "dependency job ID (repeatable, enqueue only)")
+	group := fs.String("group", "", "group ID linking jobs for cancel-group (enqueue only)")
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
 	}
@@ -57,7 +60,7 @@ func run(args []string) error {
 			return err
 		}
 		defer store.Close()
-		job, err := jobs.NewManager(store, registry).Enqueue(rest[0], payload, maxAttempts)
+		job, err := jobs.NewManager(store, registry).EnqueueWithDeps(rest[0], payload, maxAttempts, deps, *group)
 		if err != nil {
 			return err
 		}
@@ -98,6 +101,46 @@ func run(args []string) error {
 		defer store.Close()
 		_, err = jobs.NewManager(store, registry).Cancel(rest[0])
 		return err
+	case "cancel-group":
+		if len(rest) != 1 {
+			return fmt.Errorf("usage: jobctl cancel-group [--store file] <group-id>")
+		}
+		store, err := jobs.OpenStore(*storePath)
+		if err != nil {
+			return err
+		}
+		defer store.Close()
+		canceled, err := jobs.NewManager(store, registry).CancelGroup(rest[0])
+		if err != nil {
+			return err
+		}
+		return printJSON(canceled)
+	case "verify":
+		if len(rest) < 2 {
+			return fmt.Errorf("usage: jobctl verify [--store file] <job-id> <succeeded|failed> [note]")
+		}
+		var succeeded bool
+		switch rest[1] {
+		case "succeeded":
+			succeeded = true
+		case "failed":
+		default:
+			return fmt.Errorf("verify outcome must be succeeded or failed, got %q", rest[1])
+		}
+		note := ""
+		if len(rest) > 2 {
+			note = rest[2]
+		}
+		store, err := jobs.OpenStore(*storePath)
+		if err != nil {
+			return err
+		}
+		defer store.Close()
+		job, err := jobs.NewManager(store, registry).Verify(rest[0], succeeded, note)
+		if err != nil {
+			return err
+		}
+		return printJSON(job)
 	case "recover":
 		store, err := jobs.OpenStore(*storePath)
 		if err != nil {
@@ -148,5 +191,13 @@ func printJSON(value any) error {
 }
 
 func usage() {
-	fmt.Println(`commands: types, enqueue, list, show, cancel, recover, worker`)
+	fmt.Println(`commands: types, enqueue, list, show, cancel, cancel-group, verify, recover, worker`)
+}
+
+type stringList []string
+
+func (l *stringList) String() string { return fmt.Sprint([]string(*l)) }
+func (l *stringList) Set(value string) error {
+	*l = append(*l, value)
+	return nil
 }
