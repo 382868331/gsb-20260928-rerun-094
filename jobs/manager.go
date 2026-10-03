@@ -15,6 +15,12 @@ var (
 var (
 	ErrUnknownDependency = errors.New("unknown dependency")
 	ErrDependencyFailed  = errors.New("dependency did not succeed")
+	ErrArtifactRevoked   = errors.New("dependency artifact revoked")
+	ErrExternalPending   = errors.New("dependency has unverified external effects")
+	ErrNotSucceeded      = errors.New("job has no confirmed artifact")
+	ErrStaleGeneration   = errors.New("revision targets an outdated generation")
+	ErrRevisionClosed    = errors.New("revision is no longer open")
+	ErrChangeNotOpen     = errors.New("change is not open")
 )
 
 type Manager struct {
@@ -76,7 +82,7 @@ func (m *Manager) Enqueue(typ, payload string, maxAttempts int, opts ...EnqueueO
 		if err != nil {
 			return nil, fmt.Errorf("%w: %s", ErrUnknownDependency, depID)
 		}
-		if dep.Status == StatusFailed || dep.Status == StatusCanceled {
+		if dep.Status == StatusFailed || dep.Status == StatusCanceled || dep.ArtifactState == ArtifactRevoked {
 			return nil, fmt.Errorf("%w: %s is %s", ErrDependencyFailed, depID, dep.Status)
 		}
 	}
@@ -103,7 +109,7 @@ func (m *Manager) Claim() (*Job, *Attempt, error) {
 			if job.Status != StatusPending || (job.NextRunAt != nil && job.NextRunAt.After(now)) {
 				return nil
 			}
-			depResults, ready, blocked := resolveDependencies(job, all)
+			depResults, depGenerations, ready, blocked := resolveDependencies(job, all)
 			if blocked != "" {
 				job.Status = StatusCanceled
 				job.Error = blocked
@@ -120,7 +126,9 @@ func (m *Manager) Claim() (*Job, *Attempt, error) {
 			job.NextRunAt = nil
 			job.Error = ""
 			job.UpdatedAt = now
-			*list = append(*list, &Attempt{Number: job.AttemptCount, Status: AttemptRunning, StartedAt: now, DepResults: depResults})
+			revisionID := job.PendingRevisionID
+			job.PendingRevisionID = ""
+			*list = append(*list, &Attempt{Number: job.AttemptCount, Status: AttemptRunning, StartedAt: now, DepResults: depResults, DepGenerations: depGenerations, RevisionID: revisionID})
 			return nil
 		})
 		if err != nil {
@@ -137,26 +145,42 @@ func (m *Manager) Claim() (*Job, *Attempt, error) {
 // confirmed results of succeeded predecessors once every dependency has
 // succeeded. A dependency that failed or was canceled permanently blocks the
 // job, reported as a non-empty blocked reason.
-func resolveDependencies(job *Job, all map[string]*Job) (map[string]string, bool, string) {
+// resolveDependencies returns the confirmed artifacts a pending job may
+// consume, together with the exact generation of each one. Revoked artifacts
+// permanently block the job; open external-effect verifications make it wait
+// without canceling it, so no branch proceeds against an unverified result.
+func resolveDependencies(job *Job, all map[string]*Job) (map[string]string, map[string]int, bool, string) {
 	if len(job.DependsOn) == 0 {
-		return nil, true, ""
+		return nil, nil, true, ""
 	}
 	results := make(map[string]string, len(job.DependsOn))
+	generations := make(map[string]int, len(job.DependsOn))
 	for _, depID := range job.DependsOn {
 		dep, ok := all[depID]
 		if !ok {
-			return nil, false, fmt.Sprintf("%s: %s is missing", ErrDependencyFailed, depID)
+			return nil, nil, false, fmt.Sprintf("%s: %s is missing", ErrDependencyFailed, depID)
+		}
+		if dep.ArtifactState == ArtifactRevoked {
+			return nil, nil, false, fmt.Sprintf("%s: %s artifact was revoked", ErrArtifactRevoked, depID)
 		}
 		switch dep.Status {
 		case StatusSucceeded:
-			results[depID] = dep.Result
+			if dep.ExternalPending {
+				return nil, nil, false, ""
+			}
+			active := activeArtifact(dep)
+			if active == nil {
+				return nil, nil, false, ""
+			}
+			results[depID] = active.Result
+			generations[depID] = active.Generation
 		case StatusFailed, StatusCanceled:
-			return nil, false, fmt.Sprintf("%s: %s is %s", ErrDependencyFailed, depID, dep.Status)
+			return nil, nil, false, fmt.Sprintf("%s: %s is %s", ErrDependencyFailed, depID, dep.Status)
 		default:
-			return nil, false, ""
+			return nil, nil, false, ""
 		}
 	}
-	return results, true, ""
+	return results, generations, true, ""
 }
 
 func (m *Manager) Complete(jobID string, attempt int, result string, execErr error) (*Job, error) {
@@ -194,6 +218,7 @@ func (m *Manager) Complete(jobID string, attempt int, result string, execErr err
 			job.Error = ""
 			job.CurrentAttempt = 0
 			job.NextRunAt = nil
+			commitArtifact(job, result, attempt, record.DepGenerations, record.RevisionID, now)
 		}
 		job.UpdatedAt = now
 		return nil

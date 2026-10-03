@@ -18,6 +18,8 @@ type snapshot struct {
 	NextSeq  int                   `json:"next_seq"`
 	Jobs     map[string]*Job       `json:"jobs"`
 	Attempts map[string][]*Attempt `json:"attempts"`
+	Revisions map[string]*RevisionCandidate `json:"revisions,omitempty"`
+	NextRevisionSeq int           `json:"next_revision_seq,omitempty"`
 }
 
 type Store struct {
@@ -117,6 +119,42 @@ func (s *Store) Mutate(id string, fn func(*Job, *[]*Attempt) error) (*Job, []*At
 	return result, resultAttempts, err
 }
 
+// MutateAll runs fn against the whole graph in one locked, atomic
+// transaction. Revisions must be applied together with the downstream
+// invalidation they cause, which cannot be expressed with single-job Mutate.
+func (s *Store) MutateAll(fn func(snap *SnapshotView) error) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.withLock(func(snap *snapshot) error {
+		return fn(&SnapshotView{snap: snap})
+	})
+}
+
+// SnapshotView exposes the persisted graph inside a MutateAll transaction.
+type SnapshotView struct {
+	snap *snapshot
+}
+
+func (v *SnapshotView) Jobs() map[string]*Job { return v.snap.Jobs }
+
+func (v *SnapshotView) Attempts(jobID string) []*Attempt { return v.snap.Attempts[jobID] }
+
+func (v *SnapshotView) SetAttempts(jobID string, attempts []*Attempt) { v.snap.Attempts[jobID] = attempts }
+
+func (v *SnapshotView) Revisions() map[string]*RevisionCandidate { return v.snap.Revisions }
+
+func (v *SnapshotView) PutRevision(rev *RevisionCandidate) {
+	if v.snap.Revisions == nil {
+		v.snap.Revisions = map[string]*RevisionCandidate{}
+	}
+	v.snap.Revisions[rev.ID] = rev
+}
+
+func (v *SnapshotView) NextRevisionID(createdAt time.Time) string {
+	v.snap.NextRevisionSeq++
+	return fmt.Sprintf("rev-%d-%d", v.snap.NextRevisionSeq, createdAt.UnixNano())
+}
+
 // MutateGraph works like Mutate but also exposes the full job map so the
 // callback can resolve dependencies atomically inside the same transaction.
 func (s *Store) MutateGraph(id string, fn func(job *Job, attempts *[]*Attempt, all map[string]*Job) error) (*Job, []*Attempt, error) {
@@ -179,6 +217,9 @@ func loadSnapshot(path string) (*snapshot, error) {
 	}
 	if snap.Attempts == nil {
 		snap.Attempts = map[string][]*Attempt{}
+	}
+	if snap.Revisions == nil {
+		snap.Revisions = map[string]*RevisionCandidate{}
 	}
 	if snap.NextSeq == 0 {
 		snap.NextSeq = len(snap.Jobs)
