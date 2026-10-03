@@ -14,10 +14,11 @@ import (
 var ErrNotFound = errors.New("job not found")
 
 type snapshot struct {
-	Seq      int                   `json:"seq"`
-	NextSeq  int                   `json:"next_seq"`
-	Jobs     map[string]*Job       `json:"jobs"`
-	Attempts map[string][]*Attempt `json:"attempts"`
+	Seq       int                   `json:"seq"`
+	NextSeq   int                   `json:"next_seq"`
+	Jobs      map[string]*Job       `json:"jobs"`
+	Attempts  map[string][]*Attempt `json:"attempts"`
+	Revisions map[string]*Revision  `json:"revisions,omitempty"`
 }
 
 type Store struct {
@@ -180,6 +181,9 @@ func loadSnapshot(path string) (*snapshot, error) {
 	if snap.Attempts == nil {
 		snap.Attempts = map[string][]*Attempt{}
 	}
+	if snap.Revisions == nil {
+		snap.Revisions = map[string]*Revision{}
+	}
 	if snap.NextSeq == 0 {
 		snap.NextSeq = len(snap.Jobs)
 	}
@@ -206,6 +210,63 @@ func copyAttempts(in []*Attempt) []*Attempt {
 		out[i] = &a
 	}
 	return out
+}
+
+// MutateMany runs fn inside one locked transaction over the whole graph:
+// jobs, attempts and revisions are all committed or rolled back together.
+func (s *Store) MutateMany(fn func(jobs map[string]*Job, attempts map[string][]*Attempt, revisions map[string]*Revision) error) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.withLock(func(snap *snapshot) error {
+		return fn(snap.Jobs, snap.Attempts, snap.Revisions)
+	})
+}
+
+// SaveRevision inserts or replaces a revision, assigning an ID on insert.
+func (s *Store) SaveRevision(rev *Revision) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.withLock(func(snap *snapshot) error {
+		if rev.ID == "" {
+			snap.NextSeq++
+			rev.ID = fmt.Sprintf("rev-%d-%d", snap.NextSeq, rev.CreatedAt.UnixNano())
+		}
+		revCopy := *rev
+		snap.Revisions[rev.ID] = &revCopy
+		return nil
+	})
+}
+
+func (s *Store) GetRevision(id string) (*Revision, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var result *Revision
+	err := s.withLock(func(snap *snapshot) error {
+		rev, ok := snap.Revisions[id]
+		if !ok {
+			return ErrRevisionNotFound
+		}
+		revCopy := *rev
+		result = &revCopy
+		return nil
+	})
+	return result, err
+}
+
+func (s *Store) ListRevisions() ([]*Revision, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var revisions []*Revision
+	err := s.withLock(func(snap *snapshot) error {
+		revisions = make([]*Revision, 0, len(snap.Revisions))
+		for _, rev := range snap.Revisions {
+			revCopy := *rev
+			revisions = append(revisions, &revCopy)
+		}
+		sort.Slice(revisions, func(i, j int) bool { return revisions[i].CreatedAt.Before(revisions[j].CreatedAt) })
+		return nil
+	})
+	return revisions, err
 }
 
 func nowTime() time.Time { return time.Now().UTC() }

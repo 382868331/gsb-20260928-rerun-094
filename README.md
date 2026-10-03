@@ -34,6 +34,17 @@ Go 实现的本地后台作业平台，包含作业定义、运行实例、持�
 - 仍在执行的任务获得独立终态：当前尝试标记为 `CANCELED` 并写入完成时间，迟到结果依旧被拒绝。
 - 组外作业不受影响；组内后继若因前置被取消而阻断，同样按依赖失败规则终止。
 
+## 产物修订
+
+已经 `SUCCEEDED` 的上游作业可以提交修订候选，声明替换或撤销哪些产物：
+
+- `revise --replace <job>=<新结果> [--replace ...] [--withdraw <job>]` 创建修订候选并返回影响分析：哪些下游作业会被重做（`affected`）、哪些已完成结果仍可沿用（`reusable`）、哪些分支卡在未核实的外部效果上（`pending_external`）。
+- `revise-confirm <rev-id> [--only id1,id2]` 确认整组修订，或只接受部分产物变化；其余变化保持待确认，可稍后再次 confirm。`revise-cancel <rev-id>` 放弃尚未确认的变化，已确认的部分保留。
+- 每次确认都会为目标产物发布新的**代（generation）**并追加到 `result_history`；原有尝试记录与历史代原样保留，修订不会把历史执行改写成从未发生。`revise-show` 可比较每个变化修订前后的结果与代。
+- 受影响的后继作业被重置为 `PENDING` 并记录触发修订的 `revision_id`；重新派发时尝试记录 `dep_generations`，明确引用本次确认的产物代，避免混用不同代的候选结果。两次修订交错时，下游只按最新确认的一代重跑一次。
+- 撤销（withdraw）产物后，依赖它的作业按依赖失败规则阻断，也不允许再以它为前置提交新作业。
+- 修订波及 `SafeToRetry: false` 的作业时，平台不会自动重做可能已产生外部副作用的步骤，而是把它单独列为待决事项；`resolve <job-id> confirmed <结果>` 表示外部效果确实发生（结果作为人工确认的代发布，分支继续），`resolve <job-id> failed` 表示未发生（分支按失败终止）。崩溃恢复产生的不确定失败同样通过 `resolve` 给出结论后才会继续相关分支。
+
 ## 持久化与取消
 
 状态默认写入 `data/jobs.json`，每次事务通过同目录锁文件串行化，并以临时文件原子替换。工作者启动时会把上次遗留的 `RUNNING` 尝试标记为 `INTERRUPTED`，再按任务的安全重试策略恢复；已经完成的作业和结果保留不变。
@@ -52,6 +63,10 @@ go run ./cmd/jobctl list
 go run ./cmd/jobctl show <job-id>
 go run ./cmd/jobctl cancel <job-id>
 go run ./cmd/jobctl cancel-group pipeline
+go run ./cmd/jobctl revise --replace <job-id>=new-result
+go run ./cmd/jobctl revise-confirm <revision-id>
+go run ./cmd/jobctl revise-show <revision-id>
+go run ./cmd/jobctl resolve <job-id> confirmed "verified result"
 go run ./cmd/jobctl recover
 ```
 

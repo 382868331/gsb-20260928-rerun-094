@@ -30,6 +30,11 @@ func run(args []string) error {
 	storePath := fs.String("store", "data/jobs.json", "job state file")
 	dependsOn := fs.String("depends-on", "", "comma-separated predecessor job IDs (enqueue)")
 	group := fs.String("group", "", "group name for batch cancel (enqueue)")
+	replaces := replaceFlags{}
+	fs.Var(replaces, "replace", "artifact replacement job-id=new-result (revise, repeatable)")
+	withdraws := stringListFlag{}
+	fs.Var(&withdraws, "withdraw", "job ID whose artifact is withdrawn (revise, repeatable)")
+	only := fs.String("only", "", "comma-separated job IDs to confirm partially (revise-confirm)")
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
 	}
@@ -133,6 +138,106 @@ func run(args []string) error {
 			return err
 		}
 		return printJSON(recovered)
+	case "revise":
+		if len(replaces) == 0 && len(withdraws) == 0 {
+			return fmt.Errorf("usage: jobctl revise [--store file] --replace job-id=new-result [--withdraw job-id]")
+		}
+		store, err := jobs.OpenStore(*storePath)
+		if err != nil {
+			return err
+		}
+		defer store.Close()
+		var specs []jobs.ChangeSpec
+		for jobID, newResult := range replaces {
+			specs = append(specs, jobs.ChangeSpec{JobID: jobID, Action: jobs.ActionReplace, NewResult: newResult})
+		}
+		for _, jobID := range withdraws {
+			specs = append(specs, jobs.ChangeSpec{JobID: jobID, Action: jobs.ActionWithdraw})
+		}
+		rev, err := jobs.NewManager(store, registry).ProposeRevision(specs)
+		if err != nil {
+			return err
+		}
+		return printJSON(rev)
+	case "revisions":
+		store, err := jobs.OpenStore(*storePath)
+		if err != nil {
+			return err
+		}
+		defer store.Close()
+		revisions, err := jobs.NewManager(store, registry).ListRevisions()
+		if err != nil {
+			return err
+		}
+		return printJSON(revisions)
+	case "revise-show":
+		if len(rest) != 1 {
+			return fmt.Errorf("usage: jobctl revise-show [--store file] <revision-id>")
+		}
+		store, err := jobs.OpenStore(*storePath)
+		if err != nil {
+			return err
+		}
+		defer store.Close()
+		rev, err := jobs.NewManager(store, registry).GetRevision(rest[0])
+		if err != nil {
+			return err
+		}
+		return printJSON(rev)
+	case "revise-confirm":
+		if len(rest) != 1 {
+			return fmt.Errorf("usage: jobctl revise-confirm [--store file] [--only id1,id2] <revision-id>")
+		}
+		store, err := jobs.OpenStore(*storePath)
+		if err != nil {
+			return err
+		}
+		defer store.Close()
+		var onlyIDs []string
+		if *only != "" {
+			onlyIDs = strings.Split(*only, ",")
+		}
+		rev, err := jobs.NewManager(store, registry).ConfirmRevision(rest[0], onlyIDs)
+		if err != nil {
+			return err
+		}
+		return printJSON(rev)
+	case "revise-cancel":
+		if len(rest) != 1 {
+			return fmt.Errorf("usage: jobctl revise-cancel [--store file] <revision-id>")
+		}
+		store, err := jobs.OpenStore(*storePath)
+		if err != nil {
+			return err
+		}
+		defer store.Close()
+		rev, err := jobs.NewManager(store, registry).CancelRevision(rest[0])
+		if err != nil {
+			return err
+		}
+		return printJSON(rev)
+	case "resolve":
+		if len(rest) < 2 {
+			return fmt.Errorf("usage: jobctl resolve [--store file] <job-id> <confirmed|failed> [result]")
+		}
+		store, err := jobs.OpenStore(*storePath)
+		if err != nil {
+			return err
+		}
+		defer store.Close()
+		confirmed := rest[1] == "confirmed"
+		if !confirmed && rest[1] != "failed" {
+			return fmt.Errorf("outcome must be confirmed or failed, got %q", rest[1])
+		}
+		result := ""
+		if len(rest) > 2 {
+			result = rest[2]
+		}
+		job, err := jobs.NewManager(store, registry).ResolveExternal(rest[0], confirmed, result)
+		if err != nil {
+			return err
+		}
+		return printJSON(job)
 	case "worker":
 		return runWorker(*storePath, registry)
 	default:
@@ -172,5 +277,27 @@ func printJSON(value any) error {
 }
 
 func usage() {
-	fmt.Println(`commands: types, enqueue, list, show, cancel, cancel-group, recover, worker`)
+	fmt.Println(`commands: types, enqueue, list, show, cancel, cancel-group, recover, revise, revisions, revise-show, revise-confirm, revise-cancel, resolve, worker`)
+}
+
+type replaceFlags map[string]string
+
+func (f replaceFlags) String() string { return "" }
+
+func (f replaceFlags) Set(value string) error {
+	jobID, result, ok := strings.Cut(value, "=")
+	if !ok || jobID == "" {
+		return fmt.Errorf("--replace expects job-id=new-result, got %q", value)
+	}
+	f[jobID] = result
+	return nil
+}
+
+type stringListFlag []string
+
+func (f *stringListFlag) String() string { return strings.Join(*f, ",") }
+
+func (f *stringListFlag) Set(value string) error {
+	*f = append(*f, value)
+	return nil
 }

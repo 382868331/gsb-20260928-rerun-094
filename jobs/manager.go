@@ -79,6 +79,9 @@ func (m *Manager) Enqueue(typ, payload string, maxAttempts int, opts ...EnqueueO
 		if dep.Status == StatusFailed || dep.Status == StatusCanceled {
 			return nil, fmt.Errorf("%w: %s is %s", ErrDependencyFailed, depID, dep.Status)
 		}
+		if dep.Withdrawn {
+			return nil, fmt.Errorf("%w: %s result was withdrawn by a revision", ErrDependencyFailed, depID)
+		}
 	}
 	return job, m.store.Create(job)
 }
@@ -103,7 +106,7 @@ func (m *Manager) Claim() (*Job, *Attempt, error) {
 			if job.Status != StatusPending || (job.NextRunAt != nil && job.NextRunAt.After(now)) {
 				return nil
 			}
-			depResults, ready, blocked := resolveDependencies(job, all)
+			depResults, depGenerations, ready, blocked := resolveDependencies(job, all)
 			if blocked != "" {
 				job.Status = StatusCanceled
 				job.Error = blocked
@@ -120,7 +123,7 @@ func (m *Manager) Claim() (*Job, *Attempt, error) {
 			job.NextRunAt = nil
 			job.Error = ""
 			job.UpdatedAt = now
-			*list = append(*list, &Attempt{Number: job.AttemptCount, Status: AttemptRunning, StartedAt: now, DepResults: depResults})
+			*list = append(*list, &Attempt{Number: job.AttemptCount, Status: AttemptRunning, StartedAt: now, DepResults: depResults, DepGenerations: depGenerations, RevisionID: job.RevisionID})
 			return nil
 		})
 		if err != nil {
@@ -134,29 +137,40 @@ func (m *Manager) Claim() (*Job, *Attempt, error) {
 }
 
 // resolveDependencies inspects a pending job's dependencies. It returns the
-// confirmed results of succeeded predecessors once every dependency has
-// succeeded. A dependency that failed or was canceled permanently blocks the
-// job, reported as a non-empty blocked reason.
-func resolveDependencies(job *Job, all map[string]*Job) (map[string]string, bool, string) {
+// confirmed results and artifact generations of succeeded predecessors once
+// every dependency has succeeded. A dependency that failed, was canceled, or
+// had its result withdrawn by a revision permanently blocks the job,
+// reported as a non-empty blocked reason.
+func resolveDependencies(job *Job, all map[string]*Job) (map[string]string, map[string]int, bool, string) {
 	if len(job.DependsOn) == 0 {
-		return nil, true, ""
+		return nil, nil, true, ""
 	}
 	results := make(map[string]string, len(job.DependsOn))
+	generations := make(map[string]int, len(job.DependsOn))
 	for _, depID := range job.DependsOn {
 		dep, ok := all[depID]
 		if !ok {
-			return nil, false, fmt.Sprintf("%s: %s is missing", ErrDependencyFailed, depID)
+			return nil, nil, false, fmt.Sprintf("%s: %s is missing", ErrDependencyFailed, depID)
 		}
 		switch dep.Status {
 		case StatusSucceeded:
+			if dep.Withdrawn {
+				return nil, nil, false, fmt.Sprintf("%s: %s result was withdrawn by a revision", ErrDependencyFailed, depID)
+			}
+			if dep.ExternalPending {
+				// The dependency's external effect awaits a user verdict;
+				// hold the branch without failing it.
+				return nil, nil, false, ""
+			}
 			results[depID] = dep.Result
+			generations[depID] = dep.Generation
 		case StatusFailed, StatusCanceled:
-			return nil, false, fmt.Sprintf("%s: %s is %s", ErrDependencyFailed, depID, dep.Status)
+			return nil, nil, false, fmt.Sprintf("%s: %s is %s", ErrDependencyFailed, depID, dep.Status)
 		default:
-			return nil, false, ""
+			return nil, nil, false, ""
 		}
 	}
-	return results, true, ""
+	return results, generations, true, ""
 }
 
 func (m *Manager) Complete(jobID string, attempt int, result string, execErr error) (*Job, error) {
@@ -194,6 +208,13 @@ func (m *Manager) Complete(jobID string, attempt int, result string, execErr err
 			job.Error = ""
 			job.CurrentAttempt = 0
 			job.NextRunAt = nil
+			job.Generation++
+			job.ResultHistory = append(job.ResultHistory, ResultPublication{
+				Generation:  job.Generation,
+				Result:      result,
+				Source:      "execution",
+				PublishedAt: now,
+			})
 		}
 		job.UpdatedAt = now
 		return nil
@@ -290,6 +311,7 @@ func (m *Manager) RecoverInterrupted() ([]string, error) {
 			} else {
 				job.Status = StatusFailed
 				job.CurrentAttempt = 0
+				job.ExternalPending = true
 				job.Error = "interrupted before confirmation; result is ambiguous and cannot safely be retried"
 			}
 			job.UpdatedAt = now
