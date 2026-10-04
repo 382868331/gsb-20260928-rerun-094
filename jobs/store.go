@@ -14,12 +14,12 @@ import (
 var ErrNotFound = errors.New("job not found")
 
 type snapshot struct {
-	Seq      int                   `json:"seq"`
-	NextSeq  int                   `json:"next_seq"`
-	Jobs     map[string]*Job       `json:"jobs"`
-	Attempts map[string][]*Attempt `json:"attempts"`
-	Revisions map[string]*RevisionCandidate `json:"revisions,omitempty"`
-	NextRevisionSeq int           `json:"next_revision_seq,omitempty"`
+	Seq             int                           `json:"seq"`
+	NextSeq         int                           `json:"next_seq"`
+	Jobs            map[string]*Job               `json:"jobs"`
+	Attempts        map[string][]*Attempt         `json:"attempts"`
+	Revisions       map[string]*RevisionCandidate `json:"revisions,omitempty"`
+	NextRevisionSeq int                           `json:"next_revision_seq,omitempty"`
 }
 
 type Store struct {
@@ -53,9 +53,8 @@ func (s *Store) Create(job *Job, attempts ...*Attempt) error {
 		jobCopy := *job
 		snap.Jobs[job.ID] = &jobCopy
 		list := make([]*Attempt, len(attempts))
-		for i := range attempts {
-			a := *attempts[i]
-			list[i] = &a
+	for i := range attempts {
+		list[i] = cloneAttempt(attempts[i])
 		}
 		snap.Attempts[job.ID] = list
 		return nil
@@ -72,8 +71,7 @@ func (s *Store) Get(id string) (*Job, []*Attempt, error) {
 		if !ok {
 			return ErrNotFound
 		}
-		jobCopy := *job
-		result = &jobCopy
+		result = cloneJob(job)
 		resultAttempts = copyAttempts(snap.Attempts[id])
 		return nil
 	})
@@ -87,8 +85,7 @@ func (s *Store) List() ([]*Job, error) {
 	err := s.withLock(func(snap *snapshot) error {
 		jobs = make([]*Job, 0, len(snap.Jobs))
 		for _, job := range snap.Jobs {
-			jobCopy := *job
-			jobs = append(jobs, &jobCopy)
+			jobs = append(jobs, cloneJob(job))
 		}
 		sort.Slice(jobs, func(i, j int) bool { return jobs[i].CreatedAt.Before(jobs[j].CreatedAt) })
 		return nil
@@ -111,8 +108,7 @@ func (s *Store) Mutate(id string, fn func(*Job, *[]*Attempt) error) (*Job, []*At
 			return err
 		}
 		snap.Attempts[id] = attempts
-		jobCopy := *job
-		result = &jobCopy
+		result = cloneJob(job)
 		resultAttempts = copyAttempts(attempts)
 		return nil
 	})
@@ -139,7 +135,9 @@ func (v *SnapshotView) Jobs() map[string]*Job { return v.snap.Jobs }
 
 func (v *SnapshotView) Attempts(jobID string) []*Attempt { return v.snap.Attempts[jobID] }
 
-func (v *SnapshotView) SetAttempts(jobID string, attempts []*Attempt) { v.snap.Attempts[jobID] = attempts }
+func (v *SnapshotView) SetAttempts(jobID string, attempts []*Attempt) {
+	v.snap.Attempts[jobID] = attempts
+}
 
 func (v *SnapshotView) Revisions() map[string]*RevisionCandidate { return v.snap.Revisions }
 
@@ -172,8 +170,7 @@ func (s *Store) MutateGraph(id string, fn func(job *Job, attempts *[]*Attempt, a
 			return err
 		}
 		snap.Attempts[id] = attempts
-		jobCopy := *job
-		result = &jobCopy
+		result = cloneJob(job)
 		resultAttempts = copyAttempts(attempts)
 		return nil
 	})
@@ -243,8 +240,7 @@ func saveSnapshot(path string, snap *snapshot) error {
 func copyAttempts(in []*Attempt) []*Attempt {
 	out := make([]*Attempt, len(in))
 	for i := range in {
-		a := *in[i]
-		out[i] = &a
+		out[i] = cloneAttempt(in[i])
 	}
 	return out
 }

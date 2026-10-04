@@ -16,13 +16,13 @@ const (
 type ChangeStatus string
 
 const (
-	ChangeProposed  ChangeStatus = "PROPOSED"
-	ChangeAccepted  ChangeStatus = "ACCEPTED"
-	ChangeRejected  ChangeStatus = "REJECTED"
-	ChangeCanceled  ChangeStatus = "CANCELLED"
+	ChangeProposed ChangeStatus = "PROPOSED"
+	ChangeAccepted ChangeStatus = "ACCEPTED"
+	ChangeRejected ChangeStatus = "REJECTED"
+	ChangeCanceled ChangeStatus = "CANCELLED"
 	// ChangeNoChange means the proposed result was identical to the active one;
 	// the change was accepted but produced no new generation and no reruns.
-	ChangeNoChange  ChangeStatus = "NO_CHANGE"
+	ChangeNoChange ChangeStatus = "NO_CHANGE"
 )
 
 // RevisionStatus is the lifecycle state of a revision candidate.
@@ -38,7 +38,7 @@ const (
 type PendingStatus string
 
 const (
-	PendingOpen     PendingStatus = "OPEN"
+	PendingOpen      PendingStatus = "OPEN"
 	PendingConfirmed PendingStatus = "CONFIRMED"
 	PendingDismissed PendingStatus = "DISMISSED"
 )
@@ -50,13 +50,13 @@ type ArtifactChange struct {
 	NewResult string       `json:"new_result,omitempty"`
 	Status    ChangeStatus `json:"status"`
 	// FromGeneration is the active generation when the change was proposed.
-	FromGeneration int     `json:"from_generation"`
+	FromGeneration int `json:"from_generation"`
 	// ToGeneration is filled in once a replacement is confirmed.
-	ToGeneration int       `json:"to_generation,omitempty"`
-	Reason       string    `json:"reason,omitempty"`
+	ToGeneration int    `json:"to_generation,omitempty"`
+	Reason       string `json:"reason,omitempty"`
 	// Unchanged is set when acceptance found the proposed result equal to the
 	// active artifact.
-	Unchanged    bool      `json:"unchanged,omitempty"`
+	Unchanged bool `json:"unchanged,omitempty"`
 }
 
 // PendingItem is an external effect that must be verified before affected
@@ -77,19 +77,19 @@ type PendingItem struct {
 // independently confirmable, so partial acceptance is supported without
 // rewriting the rest.
 type RevisionCandidate struct {
-	ID        string           `json:"id"`
-	Status    RevisionStatus   `json:"status"`
+	ID        string            `json:"id"`
+	Status    RevisionStatus    `json:"status"`
 	Changes   []*ArtifactChange `json:"changes"`
-	Pending   []*PendingItem   `json:"pending,omitempty"`
-	Note      string           `json:"note,omitempty"`
-	CreatedAt time.Time        `json:"created_at"`
-	UpdatedAt time.Time        `json:"updated_at"`
+	Pending   []*PendingItem    `json:"pending,omitempty"`
+	Note      string            `json:"note,omitempty"`
+	CreatedAt time.Time         `json:"created_at"`
+	UpdatedAt time.Time         `json:"updated_at"`
 }
 
 // ImpactedJob describes one downstream job seen by a revision preview.
 type ImpactedJob struct {
-	JobID            string `json:"job_id"`
-	CurrentGeneration int   `json:"current_generation"`
+	JobID             string `json:"job_id"`
+	CurrentGeneration int    `json:"current_generation"`
 	// ConsumedGenerations maps changed upstream job ID -> generation that the
 	// downstream's current artifact was built from.
 	ConsumedGenerations map[string]int `json:"consumed_generations"`
@@ -97,20 +97,20 @@ type ImpactedJob struct {
 
 // ChangeImpact is the computed impact of a single proposed change.
 type ChangeImpact struct {
-	ChangeIndex int            `json:"change_index"`
-	JobID       string         `json:"job_id"`
-	Kind        ChangeKind     `json:"kind"`
-	FromResult  string         `json:"from_result,omitempty"`
-	ToResult    string         `json:"to_result,omitempty"`
+	ChangeIndex int        `json:"change_index"`
+	JobID       string     `json:"job_id"`
+	Kind        ChangeKind `json:"kind"`
+	FromResult  string     `json:"from_result,omitempty"`
+	ToResult    string     `json:"to_result,omitempty"`
 	// WouldRerun lists downstream jobs whose artifacts become stale and must be
 	// redone (replace) or canceled (revoke).
-	WouldRerun  []ImpactedJob  `json:"would_rerun,omitempty"`
+	WouldRerun []ImpactedJob `json:"would_rerun,omitempty"`
 	// Reusable lists downstream jobs that stay valid: they did not consume the
 	// changed generation, so no work is repeated for them.
-	Reusable    []ImpactedJob  `json:"reusable,omitempty"`
+	Reusable []ImpactedJob `json:"reusable,omitempty"`
 	// ExternalPending lists possible external effects requiring verification.
-	ExternalPending []string   `json:"external_pending,omitempty"`
-	Unchanged   bool           `json:"unchanged,omitempty"`
+	ExternalPending []string `json:"external_pending,omitempty"`
+	Unchanged       bool     `json:"unchanged,omitempty"`
 }
 
 // RevisionPreview is shown before confirmation; nothing is mutated to build it.
@@ -122,13 +122,37 @@ type RevisionPreview struct {
 
 // ConfirmationReport summarizes what a confirm call actually did.
 type ConfirmationReport struct {
-	RevisionID       string          `json:"revision_id"`
-	Accepted         []int           `json:"accepted_indexes"`
-	Unchanged        []int           `json:"unchanged_indexes,omitempty"`
-	NewGenerations   map[string]int  `json:"new_generations,omitempty"`
-	InvalidatedJobs  []string        `json:"invalidated_jobs,omitempty"`
-	ReusableJobs     []string        `json:"reusable_jobs,omitempty"`
-	BlockedByPending []string        `json:"blocked_by_pending,omitempty"`
-	PendingOpen      []string        `json:"pending_open,omitempty"`
+	RevisionID       string             `json:"revision_id"`
+	Accepted         []int              `json:"accepted_indexes"`
+	Unchanged        []int              `json:"unchanged_indexes,omitempty"`
+	NewGenerations   map[string]int     `json:"new_generations,omitempty"`
+	InvalidatedJobs  []string           `json:"invalidated_jobs,omitempty"`
+	ReusableJobs     []string           `json:"reusable_jobs,omitempty"`
+	BlockedByPending []string           `json:"blocked_by_pending,omitempty"`
+	PendingOpen      []string           `json:"pending_open,omitempty"`
 	Revision         *RevisionCandidate `json:"revision"`
+}
+
+// ArtifactDiff compares a revision's proposed or confirmed change with the
+// artifact generations retained in the store.
+type ArtifactDiff struct {
+	ChangeIndex       int           `json:"change_index"`
+	JobID             string        `json:"job_id"`
+	Kind              ChangeKind    `json:"kind"`
+	Status            ChangeStatus  `json:"status"`
+	FromGeneration    int           `json:"from_generation"`
+	ToGeneration      int           `json:"to_generation,omitempty"`
+	BeforeResult      string        `json:"before_result,omitempty"`
+	AfterResult       string        `json:"after_result,omitempty"`
+	ProposedResult    string        `json:"proposed_result,omitempty"`
+	ActualChange      bool          `json:"actual_change"`
+	CurrentGeneration int           `json:"current_generation,omitempty"`
+	CurrentResult     string        `json:"current_result,omitempty"`
+	CurrentState      ArtifactState `json:"current_state,omitempty"`
+}
+
+type RevisionComparison struct {
+	RevisionID string         `json:"revision_id"`
+	Status     RevisionStatus `json:"status"`
+	Changes    []ArtifactDiff `json:"changes"`
 }

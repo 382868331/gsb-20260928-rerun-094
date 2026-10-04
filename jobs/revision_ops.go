@@ -24,7 +24,7 @@ func (m *Manager) ProposeRevision(changes []ChangeSpec, note string) (*RevisionC
 	now := m.now()
 	var created *RevisionCandidate
 	err := m.store.MutateAll(func(view *SnapshotView) error {
-		all := view.Jobs()
+		all := cloneJobMap(view.Jobs())
 		candidate := &RevisionCandidate{
 			ID:        view.NextRevisionID(now),
 			Status:    RevisionProposed,
@@ -135,7 +135,7 @@ func (m *Manager) PreviewRevision(id string) (*RevisionPreview, error) {
 			if change.Status != ChangeProposed {
 				stale = false
 			}
-			rerun, reusable := computeImpact(change.JobID, change.FromGeneration, change.Kind, stale, all, view)
+			rerun, reusable := computeImpact(change.JobID, change.FromGeneration, change.Kind, stale, all)
 			impact.WouldRerun = rerun
 			impact.Reusable = reusable
 			for _, pending := range candidate.Pending {
@@ -155,7 +155,7 @@ func (m *Manager) PreviewRevision(id string) (*RevisionPreview, error) {
 // built on that exact generation is invalidated, while successors that used a
 // different (older/newer) generation stay reusable. Pending successors have no
 // artifact yet and simply pick up the confirmed generation when dispatched.
-func computeImpact(rootID string, rootGen int, kind ChangeKind, stale bool, all map[string]*Job, view *SnapshotView) ([]ImpactedJob, []ImpactedJob) {
+func computeImpact(rootID string, rootGen int, kind ChangeKind, stale bool, all map[string]*Job) ([]ImpactedJob, []ImpactedJob) {
 	dependents := buildDependents(all)
 	taint := map[string]int{}
 	if stale {

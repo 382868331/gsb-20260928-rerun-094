@@ -40,6 +40,19 @@ Go 实现的本地后台作业平台，包含作业定义、运行实例、持�
 
 取消命令会先把作业原子切到 `CANCELED`。待执行作业因此不会再被派发；运行中的任务通过 context 收到取消信号，工作者之后也不会让旧尝试覆盖已取消状态。
 
+## 产物修订与版本化接续
+
+`propose-revision` 只保存候选变化，不会改写已经完成的作业。候选支持一次包含多个变化，也支持只确认其中一部分：
+
+- `preview-revision` 只读计算影响：使用被改代际的已完成下游会重做，撤销会取消下游，未消费该代际的产物保持可复用。
+- `confirm-revision --indexes 0,2` 只确认选定变化；未选择的变化仍是 `PROPOSED`，不会进入任何下游输入。
+- `cancel-revision` 可取消整组，或用 `--indexes` 取消尚未确认的部分变化；历代 artifact 和已完成 attempt 均保留，不删除或覆盖历史。
+- 确认替换会把旧 artifact 标记为 `SUPERSEDED` 并新增一代；重跑 attempt 记录 `DepGenerations`，只读取当时已确认的 active artifact。
+- 两次候选交错时，候选固定 `from_generation`；旧候选在新生代上确认会返回 `ErrStaleGeneration`。多个已确认修订若都使同一下游失效，该下游只产生一次新 attempt，attempt 会记录涉及的所有修订 ID。
+- `compare-revision` 比较候选记录与当前 artifact 谱系，列出修订前结果、确认结果、当前结果以及是否真的产生变化。
+
+候选可以携带尚未核实的外部效果。确认后对应作业保存 open pending item 并标记 external pending，相关下游保持等待；保存重开后状态仍在。人工核实后使用 `resolve-pending` 标记为 `CONFIRMED` 或 `DISMISSED`，相关分支才会继续派发。
+
 ## 使用
 
 ```bash
@@ -52,7 +65,31 @@ go run ./cmd/jobctl list
 go run ./cmd/jobctl show <job-id>
 go run ./cmd/jobctl cancel <job-id>
 go run ./cmd/jobctl cancel-group pipeline
+go run ./cmd/jobctl revisions
+go run ./cmd/jobctl propose-revision --spec-file changes.json --note 'fix upstream output'
+go run ./cmd/jobctl preview-revision <revision-id>
+go run ./cmd/jobctl confirm-revision --indexes 0 <revision-id>
+go run ./cmd/jobctl cancel-revision --indexes 1 <revision-id>
+go run ./cmd/jobctl resolve-pending --status CONFIRMED --resolution 'verified webhook' <pending-id>
+go run ./cmd/jobctl compare-revision <revision-id>
 go run ./cmd/jobctl recover
+```
+
+`changes.json` 是 `ChangeSpec` 数组，例如：
+
+```json
+[
+  {
+    "JobID": "job-1-...",
+    "Kind": "REPLACE",
+    "NewResult": "echo:corrected",
+    "ExternalEffects": ["verify that webhook idempotency key was used"]
+  },
+  {
+    "JobID": "job-2-...",
+    "Kind": "REVOKE"
+  }
+]
 ```
 
 `worker` 默认持续轮询；没有待执行任务时也会保持运行。重试回退间隔当前为 100ms，便于内置短任务快速完成。

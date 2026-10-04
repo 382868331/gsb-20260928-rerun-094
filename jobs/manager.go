@@ -126,9 +126,17 @@ func (m *Manager) Claim() (*Job, *Attempt, error) {
 			job.NextRunAt = nil
 			job.Error = ""
 			job.UpdatedAt = now
+			revisionIDs := uniqueStrings(job.PendingRevisionIDs)
 			revisionID := job.PendingRevisionID
+			if revisionID == "" && len(revisionIDs) > 0 {
+				revisionID = revisionIDs[0]
+			}
+			if revisionID != "" && !containsString(revisionIDs, revisionID) {
+				revisionIDs = append([]string{revisionID}, revisionIDs...)
+			}
 			job.PendingRevisionID = ""
-			*list = append(*list, &Attempt{Number: job.AttemptCount, Status: AttemptRunning, StartedAt: now, DepResults: depResults, DepGenerations: depGenerations, RevisionID: revisionID})
+			job.PendingRevisionIDs = nil
+			*list = append(*list, &Attempt{Number: job.AttemptCount, Status: AttemptRunning, StartedAt: now, DepResults: depResults, DepGenerations: depGenerations, RevisionID: revisionID, RevisionIDs: revisionIDs})
 			return nil
 		})
 		if err != nil {
@@ -165,7 +173,7 @@ func resolveDependencies(job *Job, all map[string]*Job) (map[string]string, map[
 		}
 		switch dep.Status {
 		case StatusSucceeded:
-			if dep.ExternalPending {
+			if dep.ExternalPending || len(dep.ExternalPendingIDs) > 0 {
 				return nil, nil, false, ""
 			}
 			active := activeArtifact(dep)
@@ -218,7 +226,8 @@ func (m *Manager) Complete(jobID string, attempt int, result string, execErr err
 			job.Error = ""
 			job.CurrentAttempt = 0
 			job.NextRunAt = nil
-			commitArtifact(job, result, attempt, record.DepGenerations, record.RevisionID, now)
+			revisionIDs := uniqueStrings(append(append([]string{}, record.RevisionIDs...), record.RevisionID))
+			commitArtifact(job, result, attempt, record.DepGenerations, revisionIDs, now)
 		}
 		job.UpdatedAt = now
 		return nil

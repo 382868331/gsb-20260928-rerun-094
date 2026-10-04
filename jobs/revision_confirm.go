@@ -13,11 +13,9 @@ import (
 // open and can be accepted later; canceling them later preserves everything.
 func (m *Manager) ConfirmRevision(revisionID string, acceptIndexes []int) (*ConfirmationReport, error) {
 	report := &ConfirmationReport{RevisionID: revisionID, NewGenerations: map[string]int{}}
-	want := map[int]bool{}
-	for _, idx := range acceptIndexes {
-		want[idx] = true
-	}
-	err := m.store.MutateAll(func(view *SnapshotView) error {
+	var want map[int]bool
+	var err error
+	err = m.store.MutateAll(func(view *SnapshotView) error {
 		candidate, ok := view.Revisions()[revisionID]
 		if !ok {
 			return fmt.Errorf("%w: %s", ErrNotFound, revisionID)
@@ -29,6 +27,10 @@ func (m *Manager) ConfirmRevision(revisionID string, acceptIndexes []int) (*Conf
 		now := m.now()
 		for _, job := range all {
 			ensureArtifacts(job, now)
+		}
+		want, err = selectedIndexes(acceptIndexes, len(candidate.Changes))
+		if err != nil {
+			return err
 		}
 		dependents := buildDependents(all)
 		invalidatedSet := map[string]bool{}
@@ -69,23 +71,22 @@ func (m *Manager) ConfirmRevision(revisionID string, acceptIndexes []int) (*Conf
 				if pending.ChangeKey == i && pending.Status == PendingOpen {
 					hasPending = true
 					report.PendingOpen = append(report.PendingOpen, pending.ID)
+					job.ExternalPendingIDs = append(job.ExternalPendingIDs, pending.ID)
 				}
 			}
-			if hasPending && change.Kind == ChangeReplace {
+			job.ExternalPendingIDs = uniqueStrings(job.ExternalPendingIDs)
+			if len(job.ExternalPendingIDs) > 0 && change.Kind == ChangeReplace {
 				job.ExternalPending = true
+			} else if !hasPending {
+				job.ExternalPending = false
 			}
 			propagateInvalidation(change, candidate, job, dependents, all, view, invalidatedSet, reusableSet, now)
-		}
-		candidate.UpdatedAt = now
-		allAccepted := true
-		for _, change := range candidate.Changes {
-			if change.Status == ChangeProposed {
-				allAccepted = false
+			if hasPending {
+				collectPendingBranches(job.ID, dependents, all, report)
 			}
 		}
-		if allAccepted {
-			candidate.Status = RevisionAccepted
-		}
+		candidate.UpdatedAt = now
+		closeRevisionIfComplete(candidate, now)
 		report.Revision = cloneRevision(candidate)
 		for id := range invalidatedSet {
 			report.InvalidatedJobs = append(report.InvalidatedJobs, id)
@@ -97,12 +98,31 @@ func (m *Manager) ConfirmRevision(revisionID string, acceptIndexes []int) (*Conf
 		}
 		sortIDs(report.InvalidatedJobs)
 		sortIDs(report.ReusableJobs)
+		sortIDs(report.BlockedByPending)
+		report.BlockedByPending = uniqueStrings(report.BlockedByPending)
 		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
 	return report, nil
+}
+
+func collectPendingBranches(rootID string, dependents map[string][]string, all map[string]*Job, report *ConfirmationReport) {
+	queue := append([]string(nil), dependents[rootID]...)
+	visited := map[string]bool{rootID: true}
+	for len(queue) > 0 {
+		id := queue[0]
+		queue = queue[1:]
+		if visited[id] {
+			continue
+		}
+		visited[id] = true
+		if job := all[id]; job != nil {
+			report.BlockedByPending = append(report.BlockedByPending, id)
+		}
+		queue = append(queue, dependents[id]...)
+	}
 }
 
 func applyReplace(job *Job, change *ArtifactChange, revisionID string, now time.Time) int {
@@ -161,15 +181,16 @@ func propagateInvalidation(change *ArtifactChange, candidate *RevisionCandidate,
 				consumedGen = active.BasedOnGenerations[up]
 			}
 			_, tainted := taint[up]
-			if tainted && active != nil && consumedGen == taint[up] && (down.Status == StatusSucceeded || down.Status == StatusRunning) {
+			materiallyStale := tainted && ((active != nil && consumedGen == taint[up] && (down.Status == StatusSucceeded || down.Status == StatusRunning)) || down.Status == StatusPending)
+			if materiallyStale {
 				invalidateJob(down, view, change, candidate, now)
 				invalidated[downID] = true
-				if down.ArtifactState == ArtifactRevoked {
+				if down.ArtifactState == ArtifactRevoked || active == nil {
 					taint[downID] = down.Generation
 				} else {
-				// Redo consumers the confirmed generations; the old generation
-				// is the one that further successors must have built upon to be
-				// considered stale.
+					// Redo consumers the confirmed generations; the old generation
+					// is the one that further successors must have built upon to be
+					// considered stale.
 					taint[downID] = active.Generation
 				}
 			} else if down.Status == StatusSucceeded {
@@ -210,6 +231,7 @@ func invalidateJob(job *Job, view *SnapshotView, change *ArtifactChange, candida
 		job.Error = "invalidated by " + candidate.ID + "; redo must reference confirmed artifact generations"
 		job.NextRunAt = nil
 		job.PendingRevisionID = candidate.ID
+		job.PendingRevisionIDs = uniqueStrings(append(job.PendingRevisionIDs, candidate.ID))
 	}
 	for i := len(attempts) - 1; i >= 0; i-- {
 		if attempts[i].Number == job.CurrentAttempt && attempts[i].Status == AttemptRunning {

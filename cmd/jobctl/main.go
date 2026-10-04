@@ -26,22 +26,27 @@ func run(args []string) error {
 		usage()
 		return nil
 	}
-	fs := flag.NewFlagSet(args[0], flag.ContinueOnError)
-	storePath := fs.String("store", "data/jobs.json", "job state file")
-	dependsOn := fs.String("depends-on", "", "comma-separated predecessor job IDs (enqueue)")
-	group := fs.String("group", "", "group name for batch cancel (enqueue)")
-	if err := fs.Parse(args[1:]); err != nil {
+	command := args[0]
+	storePath := "data/jobs.json"
+	rest, err := extractGlobalStore(args[1:], &storePath)
+	if err != nil {
 		return err
 	}
-	rest := fs.Args()
 	registry := jobs.BuiltinRegistry()
 
-	switch args[0] {
+	switch command {
 	case "types":
 		for _, typ := range registry.Types() {
 			fmt.Println(typ)
 		}
 	case "enqueue":
+		enqueueFlags := flag.NewFlagSet("enqueue", flag.ContinueOnError)
+		dependsOn := enqueueFlags.String("depends-on", "", "comma-separated predecessor job IDs (enqueue)")
+		group := enqueueFlags.String("group", "", "group name for batch cancel (enqueue)")
+		if err := enqueueFlags.Parse(rest); err != nil {
+			return err
+		}
+		rest = enqueueFlags.Args()
 		if len(rest) < 1 {
 			return fmt.Errorf("usage: jobctl enqueue [--store file] [--depends-on id1,id2] [--group name] <type> [payload] [max-attempts]")
 		}
@@ -55,7 +60,7 @@ func run(args []string) error {
 				return err
 			}
 		}
-		store, err := jobs.OpenStore(*storePath)
+		store, err := jobs.OpenStore(storePath)
 		if err != nil {
 			return err
 		}
@@ -76,7 +81,7 @@ func run(args []string) error {
 		if len(rest) != 1 {
 			return fmt.Errorf("usage: jobctl cancel-group [--store file] <group-name>")
 		}
-		store, err := jobs.OpenStore(*storePath)
+		store, err := jobs.OpenStore(storePath)
 		if err != nil {
 			return err
 		}
@@ -87,7 +92,7 @@ func run(args []string) error {
 		}
 		return printJSON(canceled)
 	case "list":
-		store, err := jobs.OpenStore(*storePath)
+		store, err := jobs.OpenStore(storePath)
 		if err != nil {
 			return err
 		}
@@ -101,7 +106,7 @@ func run(args []string) error {
 		if len(rest) != 1 {
 			return fmt.Errorf("usage: jobctl show [--store file] <job-id>")
 		}
-		store, err := jobs.OpenStore(*storePath)
+		store, err := jobs.OpenStore(storePath)
 		if err != nil {
 			return err
 		}
@@ -115,7 +120,7 @@ func run(args []string) error {
 		if len(rest) != 1 {
 			return fmt.Errorf("usage: jobctl cancel [--store file] <job-id>")
 		}
-		store, err := jobs.OpenStore(*storePath)
+		store, err := jobs.OpenStore(storePath)
 		if err != nil {
 			return err
 		}
@@ -123,7 +128,7 @@ func run(args []string) error {
 		_, err = jobs.NewManager(store, registry).Cancel(rest[0])
 		return err
 	case "recover":
-		store, err := jobs.OpenStore(*storePath)
+		store, err := jobs.OpenStore(storePath)
 		if err != nil {
 			return err
 		}
@@ -134,7 +139,139 @@ func run(args []string) error {
 		}
 		return printJSON(recovered)
 	case "worker":
-		return runWorker(*storePath, registry)
+		return runWorker(storePath, registry)
+	case "revisions":
+		store, err := jobs.OpenStore(storePath)
+		if err != nil {
+			return err
+		}
+		defer store.Close()
+		revisions, err := jobs.NewManager(store, registry).ListRevisions()
+		if err != nil {
+			return err
+		}
+		return printJSON(revisions)
+	case "propose-revision":
+		cmdFlags := flag.NewFlagSet("propose-revision", flag.ContinueOnError)
+		cmdStore := cmdFlags.String("store", storePath, "job state file")
+		specPath := cmdFlags.String("spec-file", "", "JSON file containing ChangeSpec values")
+		specJSON := cmdFlags.String("spec", "", "JSON array containing ChangeSpec values")
+		note := cmdFlags.String("note", "", "revision note")
+		var err error
+		if err = cmdFlags.Parse(rest); err != nil {
+			return err
+		}
+		var data []byte
+		data = []byte(*specJSON)
+		if *specPath != "" {
+			data, err = os.ReadFile(*specPath)
+			if err != nil {
+				return err
+			}
+		}
+		var specs []jobs.ChangeSpec
+		if err := json.Unmarshal(data, &specs); err != nil {
+			return err
+		}
+		store, err := jobs.OpenStore(*cmdStore)
+		if err != nil {
+			return err
+		}
+		defer store.Close()
+		revision, err := jobs.NewManager(store, registry).ProposeRevision(specs, *note)
+		if err != nil {
+			return err
+		}
+		return printJSON(revision)
+	case "preview-revision", "show-revision", "compare-revision":
+		cmdFlags := flag.NewFlagSet(args[0], flag.ContinueOnError)
+		cmdStore := cmdFlags.String("store", storePath, "job state file")
+		if err := cmdFlags.Parse(rest); err != nil {
+			return err
+		}
+		if cmdFlags.NArg() != 1 {
+			return fmt.Errorf("usage: jobctl %s [--store file] <revision-id>", args[0])
+		}
+		store, err := jobs.OpenStore(*cmdStore)
+		if err != nil {
+			return err
+		}
+		defer store.Close()
+		manager := jobs.NewManager(store, registry)
+		var value any
+		switch args[0] {
+		case "preview-revision":
+			value, err = manager.PreviewRevision(cmdFlags.Arg(0))
+		case "show-revision":
+			value, err = manager.GetRevision(cmdFlags.Arg(0))
+		case "compare-revision":
+			value, err = manager.CompareRevision(cmdFlags.Arg(0))
+		}
+		if err != nil {
+			return err
+		}
+		return printJSON(value)
+	case "confirm-revision", "cancel-revision":
+		cmdFlags := flag.NewFlagSet(args[0], flag.ContinueOnError)
+		cmdStore := cmdFlags.String("store", storePath, "job state file")
+		indexes := cmdFlags.String("indexes", "", "comma-separated zero-based change indexes; empty means all")
+		if err := cmdFlags.Parse(rest); err != nil {
+			return err
+		}
+		if cmdFlags.NArg() != 1 {
+			return fmt.Errorf("usage: jobctl %s [--store file] [--indexes 0,2] <revision-id>", args[0])
+		}
+		var selected []int
+		if *indexes != "" {
+			for _, part := range strings.Split(*indexes, ",") {
+				var index int
+				if _, err := fmt.Sscanf(strings.TrimSpace(part), "%d", &index); err != nil {
+					return err
+				}
+				selected = append(selected, index)
+			}
+		} else {
+			selected = nil
+		}
+		store, err := jobs.OpenStore(*cmdStore)
+		if err != nil {
+			return err
+		}
+		defer store.Close()
+		manager := jobs.NewManager(store, registry)
+		if args[0] == "confirm-revision" {
+			report, err := manager.ConfirmRevision(cmdFlags.Arg(0), selected)
+			if err != nil {
+				return err
+			}
+			return printJSON(report)
+		}
+		revision, err := manager.CancelRevision(cmdFlags.Arg(0), selected)
+		if err != nil {
+			return err
+		}
+		return printJSON(revision)
+	case "resolve-pending":
+		cmdFlags := flag.NewFlagSet("resolve-pending", flag.ContinueOnError)
+		cmdStore := cmdFlags.String("store", storePath, "job state file")
+		status := cmdFlags.String("status", string(jobs.PendingConfirmed), "CONFIRMED or DISMISSED")
+		resolution := cmdFlags.String("resolution", "", "human verification note")
+		if err := cmdFlags.Parse(rest); err != nil {
+			return err
+		}
+		if cmdFlags.NArg() != 1 {
+			return fmt.Errorf("usage: jobctl resolve-pending [--store file] [--status CONFIRMED|DISMISSED] [--resolution text] <pending-id>")
+		}
+		store, err := jobs.OpenStore(*cmdStore)
+		if err != nil {
+			return err
+		}
+		defer store.Close()
+		item, err := jobs.NewManager(store, registry).ResolvePending(cmdFlags.Arg(0), jobs.PendingStatus(*status), *resolution)
+		if err != nil {
+			return err
+		}
+		return printJSON(item)
 	default:
 		usage()
 		return fmt.Errorf("unknown command %q", args[0])
@@ -171,6 +308,27 @@ func printJSON(value any) error {
 	return enc.Encode(value)
 }
 
+func extractGlobalStore(args []string, storePath *string) ([]string, error) {
+	out := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--store" || arg == "-store" {
+			if i+1 >= len(args) {
+				return nil, fmt.Errorf("--store requires a path")
+			}
+			*storePath = args[i+1]
+			i++
+			continue
+		}
+		if strings.HasPrefix(arg, "--store=") || strings.HasPrefix(arg, "-store=") {
+			*storePath = strings.SplitN(arg, "=", 2)[1]
+			continue
+		}
+		out = append(out, arg)
+	}
+	return out, nil
+}
+
 func usage() {
-	fmt.Println(`commands: types, enqueue, list, show, cancel, cancel-group, recover, worker`)
+	fmt.Println(`commands: types, enqueue, list, show, cancel, cancel-group, recover, worker, revisions, propose-revision, preview-revision, show-revision, confirm-revision, cancel-revision, resolve-pending, compare-revision`)
 }
