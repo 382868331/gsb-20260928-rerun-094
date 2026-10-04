@@ -132,3 +132,49 @@ type ConfirmationReport struct {
 	PendingOpen      []string        `json:"pending_open,omitempty"`
 	Revision         *RevisionCandidate `json:"revision"`
 }
+
+// DiffEntry compares one change's before/after state using the preserved
+// artifact history, so a reopened store still shows the actual difference a
+// revision made.
+type DiffEntry struct {
+	ChangeIndex    int          `json:"change_index"`
+	JobID          string       `json:"job_id"`
+	Kind           ChangeKind   `json:"kind"`
+	Status         ChangeStatus `json:"status"`
+	FromGeneration int          `json:"from_generation"`
+	ToGeneration   int          `json:"to_generation,omitempty"`
+	FromResult     string       `json:"from_result,omitempty"`
+	ToResult       string       `json:"to_result,omitempty"`
+}
+
+// RevisionDiff is the persisted before/after comparison of a revision.
+type RevisionDiff struct {
+	RevisionID string           `json:"revision_id"`
+	Status     RevisionStatus   `json:"status"`
+	Entries    []DiffEntry      `json:"entries"`
+	Pending    []*PendingItem   `json:"pending,omitempty"`
+}
+
+// cloneRevision deep-copies a candidate so callers never alias persisted
+// state inside a store transaction.
+func cloneRevision(in *RevisionCandidate) *RevisionCandidate {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	out.Changes = make([]*ArtifactChange, len(in.Changes))
+	for i, change := range in.Changes {
+		c := *change
+		out.Changes[i] = &c
+	}
+	out.Pending = make([]*PendingItem, len(in.Pending))
+	for i, item := range in.Pending {
+		p := *item
+		if item.ResolvedAt != nil {
+			t := *item.ResolvedAt
+			p.ResolvedAt = &t
+		}
+		out.Pending[i] = &p
+	}
+	return &out
+}

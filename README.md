@@ -34,6 +34,17 @@ Go 实现的本地后台作业平台，包含作业定义、运行实例、持�
 - 仍在执行的任务获得独立终态：当前尝试标记为 `CANCELED` 并写入完成时间，迟到结果依旧被拒绝。
 - 组外作业不受影响；组内后继若因前置被取消而阻断，同样按依赖失败规则终止。
 
+## 产物修订
+
+已 `SUCCEEDED` 的作业产物可以通过修订候选（revision）替换或撤销，历史执行与历代产物全部保留：
+
+- `propose --change job:replace:<新结果> [--change job:revoke] [--external job:待核实说明] [--note 备注]` 只登记候选，不触碰任何已完成作业。
+- `preview-revision <rev>` 预览每条变更的影响：哪些下游产物会失效重跑、哪些保持可复用、哪些外部效果待核实。
+- `confirm-revision <rev> [序号...]` 整组或部分确认；未选中的变更保持开放，不会混入下游输入。替换会把旧代标记 `SUPERSEDED` 并写入新一代，撤销则标记 `REVOKED`；失效下游按依赖图回到 `PENDING`（替换）或转为 `CANCELED`（撤销），重跑尝试通过 `DepGenerations` 钉住所采用的产物代次。
+- `cancel-revision <rev> [序号...]` 取消尚未确认的变更，已确认部分与历史产物不受影响。
+- 带 `--external` 的变更确认后，对应作业及其下游分支会被待决事项阻断，`resolve-pending <pending-id> <confirm|dismiss> [说明]` 人工核实后才继续派发。
+- `diff-revision <rev>` 基于保留的历代产物比较修订前后的实际变化；确认、取消与待决状态均持久化，重开存储后保持一致。
+
 ## 持久化与取消
 
 状态默认写入 `data/jobs.json`，每次事务通过同目录锁文件串行化，并以临时文件原子替换。工作者启动时会把上次遗留的 `RUNNING` 尝试标记为 `INTERRUPTED`，再按任务的安全重试策略恢复；已经完成的作业和结果保留不变。

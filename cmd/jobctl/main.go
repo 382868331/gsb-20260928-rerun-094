@@ -30,6 +30,10 @@ func run(args []string) error {
 	storePath := fs.String("store", "data/jobs.json", "job state file")
 	dependsOn := fs.String("depends-on", "", "comma-separated predecessor job IDs (enqueue)")
 	group := fs.String("group", "", "group name for batch cancel (enqueue)")
+	note := fs.String("note", "", "revision note (propose)")
+	var changeFlags, externalFlags stringList
+	fs.Var(&changeFlags, "change", "revision change as job:replace:<new-result> or job:revoke (repeatable)")
+	fs.Var(&externalFlags, "external", "unverified external effect as job:summary (repeatable, propose)")
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
 	}
@@ -133,6 +137,138 @@ func run(args []string) error {
 			return err
 		}
 		return printJSON(recovered)
+	case "propose":
+		if len(changeFlags) == 0 {
+			return fmt.Errorf("usage: jobctl propose [--store file] [--note text] --change job:replace:<result>|job:revoke [--external job:summary]...")
+		}
+		store, err := jobs.OpenStore(*storePath)
+		if err != nil {
+			return err
+		}
+		defer store.Close()
+		externals := map[string][]string{}
+		for _, spec := range externalFlags {
+			jobID, summary, ok := strings.Cut(spec, ":")
+			if !ok || jobID == "" || summary == "" {
+				return fmt.Errorf("invalid --external %q, want job:summary", spec)
+			}
+			externals[jobID] = append(externals[jobID], summary)
+		}
+		var specs []jobs.ChangeSpec
+		for _, raw := range changeFlags {
+			spec, err := parseChangeSpec(raw, externals)
+			if err != nil {
+				return err
+			}
+			specs = append(specs, spec)
+		}
+		candidate, err := jobs.NewManager(store, registry).ProposeRevision(specs, *note)
+		if err != nil {
+			return err
+		}
+		return printJSON(candidate)
+	case "revisions":
+		store, err := jobs.OpenStore(*storePath)
+		if err != nil {
+			return err
+		}
+		defer store.Close()
+		list, err := jobs.NewManager(store, registry).ListRevisions()
+		if err != nil {
+			return err
+		}
+		return printJSON(list)
+	case "preview-revision":
+		if len(rest) != 1 {
+			return fmt.Errorf("usage: jobctl preview-revision [--store file] <revision-id>")
+		}
+		store, err := jobs.OpenStore(*storePath)
+		if err != nil {
+			return err
+		}
+		defer store.Close()
+		preview, err := jobs.NewManager(store, registry).PreviewRevision(rest[0])
+		if err != nil {
+			return err
+		}
+		return printJSON(preview)
+	case "confirm-revision":
+		if len(rest) < 1 {
+			return fmt.Errorf("usage: jobctl confirm-revision [--store file] <revision-id> [change-index...]")
+		}
+		store, err := jobs.OpenStore(*storePath)
+		if err != nil {
+			return err
+		}
+		defer store.Close()
+		indexes, err := parseIndexes(rest[1:])
+		if err != nil {
+			return err
+		}
+		report, err := jobs.NewManager(store, registry).ConfirmRevision(rest[0], indexes)
+		if err != nil {
+			return err
+		}
+		return printJSON(report)
+	case "cancel-revision":
+		if len(rest) < 1 {
+			return fmt.Errorf("usage: jobctl cancel-revision [--store file] <revision-id> [change-index...]")
+		}
+		store, err := jobs.OpenStore(*storePath)
+		if err != nil {
+			return err
+		}
+		defer store.Close()
+		indexes, err := parseIndexes(rest[1:])
+		if err != nil {
+			return err
+		}
+		candidate, err := jobs.NewManager(store, registry).CancelRevision(rest[0], indexes)
+		if err != nil {
+			return err
+		}
+		return printJSON(candidate)
+	case "resolve-pending":
+		if len(rest) < 2 {
+			return fmt.Errorf("usage: jobctl resolve-pending [--store file] <pending-id> <confirm|dismiss> [resolution]")
+		}
+		store, err := jobs.OpenStore(*storePath)
+		if err != nil {
+			return err
+		}
+		defer store.Close()
+		var status jobs.PendingStatus
+		switch rest[1] {
+		case "confirm":
+			status = jobs.PendingConfirmed
+		case "dismiss":
+			status = jobs.PendingDismissed
+		default:
+			return fmt.Errorf("resolution must be confirm or dismiss, got %q", rest[1])
+		}
+		resolution := ""
+		if len(rest) > 2 {
+			resolution = strings.Join(rest[2:], " ")
+		}
+		candidate, err := jobs.NewManager(store, registry).ResolvePending(rest[0], status, resolution)
+		if err != nil {
+			return err
+		}
+		return printJSON(candidate)
+	case "diff-revision":
+		if len(rest) != 1 {
+			return fmt.Errorf("usage: jobctl diff-revision [--store file] <revision-id>")
+		}
+		store, err := jobs.OpenStore(*storePath)
+		if err != nil {
+			return err
+		}
+		defer store.Close()
+		diff, err := jobs.NewManager(store, registry).RevisionDiff(rest[0])
+		if err != nil {
+			return err
+		}
+		return printJSON(diff)
 	case "worker":
 		return runWorker(*storePath, registry)
 	default:
@@ -172,5 +308,50 @@ func printJSON(value any) error {
 }
 
 func usage() {
-	fmt.Println(`commands: types, enqueue, list, show, cancel, cancel-group, recover, worker`)
+	fmt.Println(`commands: types, enqueue, list, show, cancel, cancel-group, recover, worker,
+  propose, revisions, preview-revision, confirm-revision, cancel-revision,
+  resolve-pending, diff-revision`)
+}
+
+type stringList []string
+
+func (l *stringList) String() string { return strings.Join(*l, ",") }
+
+func (l *stringList) Set(value string) error {
+	*l = append(*l, value)
+	return nil
+}
+
+func parseChangeSpec(raw string, externals map[string][]string) (jobs.ChangeSpec, error) {
+	jobID, after, _ := strings.Cut(raw, ":")
+	kind, rest, _ := strings.Cut(after, ":")
+	spec := jobs.ChangeSpec{JobID: jobID, ExternalEffects: externals[jobID]}
+	switch kind {
+	case "replace":
+		if rest == "" {
+			return spec, fmt.Errorf("invalid --change %q, want job:replace:<new-result>", raw)
+		}
+		spec.Kind = jobs.ChangeReplace
+		spec.NewResult = rest
+	case "revoke":
+		spec.Kind = jobs.ChangeRevoke
+	default:
+		return spec, fmt.Errorf("invalid --change %q, want job:replace:<new-result> or job:revoke", raw)
+	}
+	return spec, nil
+}
+
+func parseIndexes(args []string) ([]int, error) {
+	if len(args) == 0 {
+		return nil, nil
+	}
+	indexes := make([]int, 0, len(args))
+	for _, arg := range args {
+		var idx int
+		if _, err := fmt.Sscanf(arg, "%d", &idx); err != nil {
+			return nil, fmt.Errorf("invalid change index %q", arg)
+		}
+		indexes = append(indexes, idx)
+	}
+	return indexes, nil
 }
