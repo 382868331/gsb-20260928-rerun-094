@@ -6,106 +6,28 @@ import (
 	"time"
 )
 
-// ConfirmRevision applies the selected changes (all open changes when
-// acceptIndexes is nil). Replacement/confirmation of each artifact generation
-// and downstream invalidation happens in one atomic transaction, so redone
-// jobs can only consume the confirmed generations. Unselected changes stay
-// open and can be accepted later; canceling them later preserves everything.
+// ConfirmRevision applies the selected changes on the unassigned legacy path
+// (all open changes when acceptIndexes is nil). Assigned changes must go
+// through ReviewRevision and are refused here. Replacement of each artifact
+// generation and downstream invalidation happens in one atomic transaction,
+// so redone jobs can only consume confirmed generations.
 func (m *Manager) ConfirmRevision(revisionID string, acceptIndexes []int) (*ConfirmationReport, error) {
-	report := &ConfirmationReport{RevisionID: revisionID, NewGenerations: map[string]int{}}
-	var want map[int]bool
-	var err error
-	err = m.store.MutateAll(func(view *SnapshotView) error {
-		candidate, ok := view.Revisions()[revisionID]
-		if !ok {
-			return fmt.Errorf("%w: %s", ErrNotFound, revisionID)
+	var decisions map[int]changeDecision
+	if acceptIndexes != nil {
+		if len(acceptIndexes) == 0 {
+			return nil, fmt.Errorf("at least one change index is required")
 		}
-		if candidate.Status == RevisionCanceled {
-			return fmt.Errorf("%w: revision %s was canceled", ErrRevisionClosed, revisionID)
+		seen := map[int]bool{}
+		decisions = make(map[int]changeDecision, len(acceptIndexes))
+		for _, idx := range acceptIndexes {
+			if seen[idx] {
+				return nil, fmt.Errorf("duplicate change index %d", idx)
+			}
+			seen[idx] = true
+			decisions[idx] = changeDecision{kind: DecisionAccept}
 		}
-		all := view.Jobs()
-		now := m.now()
-		for _, job := range all {
-			ensureArtifacts(job, now)
-		}
-		want, err = selectedIndexes(acceptIndexes, len(candidate.Changes))
-		if err != nil {
-			return err
-		}
-		dependents := buildDependents(all)
-		invalidatedSet := map[string]bool{}
-		reusableSet := map[string]bool{}
-		for i, change := range candidate.Changes {
-			if acceptIndexes != nil && !want[i] {
-				continue
-			}
-			if change.Status != ChangeProposed {
-				return fmt.Errorf("%w: change %d is %s", ErrChangeNotOpen, i, change.Status)
-			}
-			job := all[change.JobID]
-			if job.Status != StatusSucceeded || job.ArtifactState != ArtifactActive {
-				return fmt.Errorf("%w: %s is %s/%s", ErrNotSucceeded, change.JobID, job.Status, job.ArtifactState)
-			}
-			if job.Generation != change.FromGeneration {
-				return fmt.Errorf("%w: change %d targets gen %d but %s is now gen %d", ErrStaleGeneration, i, change.FromGeneration, change.JobID, job.Generation)
-			}
-			change.Status = ChangeAccepted
-			change.ToGeneration = job.Generation
-			unchanged := change.Kind == ChangeReplace && change.NewResult == job.Result
-			if unchanged {
-				change.Status = ChangeNoChange
-				change.Unchanged = true
-				report.Unchanged = append(report.Unchanged, i)
-				continue
-			}
-			report.Accepted = append(report.Accepted, i)
-			if change.Kind == ChangeReplace {
-				newGen := applyReplace(job, change, candidate.ID, now)
-				change.ToGeneration = newGen
-				report.NewGenerations[job.ID] = newGen
-			} else {
-				applyRevoke(job, candidate.ID, now)
-			}
-			hasPending := false
-			for _, pending := range candidate.Pending {
-				if pending.ChangeKey == i && pending.Status == PendingOpen {
-					hasPending = true
-					report.PendingOpen = append(report.PendingOpen, pending.ID)
-					job.ExternalPendingIDs = append(job.ExternalPendingIDs, pending.ID)
-				}
-			}
-			job.ExternalPendingIDs = uniqueStrings(job.ExternalPendingIDs)
-			if len(job.ExternalPendingIDs) > 0 && change.Kind == ChangeReplace {
-				job.ExternalPending = true
-			} else if !hasPending {
-				job.ExternalPending = false
-			}
-			propagateInvalidation(change, candidate, job, dependents, all, view, invalidatedSet, reusableSet, now)
-			if hasPending {
-				collectPendingBranches(job.ID, dependents, all, report)
-			}
-		}
-		candidate.UpdatedAt = now
-		closeRevisionIfComplete(candidate, now)
-		report.Revision = cloneRevision(candidate)
-		for id := range invalidatedSet {
-			report.InvalidatedJobs = append(report.InvalidatedJobs, id)
-		}
-		for id := range reusableSet {
-			if !invalidatedSet[id] {
-				report.ReusableJobs = append(report.ReusableJobs, id)
-			}
-		}
-		sortIDs(report.InvalidatedJobs)
-		sortIDs(report.ReusableJobs)
-		sortIDs(report.BlockedByPending)
-		report.BlockedByPending = uniqueStrings(report.BlockedByPending)
-		return nil
-	})
-	if err != nil {
-		return nil, err
 	}
-	return report, nil
+	return m.applyRevisionDecisions(revisionID, decisions, DecisionAccept)
 }
 
 func collectPendingBranches(rootID string, dependents map[string][]string, all map[string]*Job, report *ConfirmationReport) {

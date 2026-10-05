@@ -10,6 +10,9 @@ type ChangeSpec struct {
 	JobID     string
 	Kind      ChangeKind
 	NewResult string
+	// Reviewer assigns this change to one reviewer. Only that reviewer's
+	// decisions are accepted. Empty keeps the legacy unassigned behavior.
+	Reviewer string
 	// ExternalEffects lists unverified external effects that the change may
 	// trigger. Each entry becomes an OPEN pending item on confirmation.
 	ExternalEffects []string
@@ -49,11 +52,12 @@ func (m *Manager) ProposeRevision(changes []ChangeSpec, note string) (*RevisionC
 				return fmt.Errorf("replace change for %s needs a new result", spec.JobID)
 			}
 			change := &ArtifactChange{
-				JobID:          spec.JobID,
-				Kind:           kind,
-				NewResult:      spec.NewResult,
-				Status:         ChangeProposed,
-				FromGeneration: job.Generation,
+				JobID:            spec.JobID,
+				Kind:             kind,
+				NewResult:        spec.NewResult,
+				Status:           ChangeProposed,
+				FromGeneration:   job.Generation,
+				AssignedReviewer: spec.Reviewer,
 			}
 			candidate.Changes = append(candidate.Changes, change)
 			for _, summary := range spec.ExternalEffects {

@@ -53,8 +53,8 @@ func (s *Store) Create(job *Job, attempts ...*Attempt) error {
 		jobCopy := *job
 		snap.Jobs[job.ID] = &jobCopy
 		list := make([]*Attempt, len(attempts))
-	for i := range attempts {
-		list[i] = cloneAttempt(attempts[i])
+		for i := range attempts {
+			list[i] = cloneAttempt(attempts[i])
 		}
 		snap.Attempts[job.ID] = list
 		return nil

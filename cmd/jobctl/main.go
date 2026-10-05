@@ -251,6 +251,44 @@ func run(args []string) error {
 			return err
 		}
 		return printJSON(revision)
+	case "review-revision":
+		cmdFlags := flag.NewFlagSet("review-revision", flag.ContinueOnError)
+		cmdStore := cmdFlags.String("store", storePath, "job state file")
+		reviewer := cmdFlags.String("reviewer", "", "reviewer submitting the decisions")
+		decisionsFlag := cmdFlags.String("decisions", "", "comma-separated index:ACCEPT|RETURN entries, e.g. 0:ACCEPT,1:RETURN")
+		reason := cmdFlags.String("reason", "", "review reason recorded with every decision")
+		if err := cmdFlags.Parse(rest); err != nil {
+			return err
+		}
+		if cmdFlags.NArg() != 1 || *reviewer == "" || *decisionsFlag == "" {
+			return fmt.Errorf("usage: jobctl review-revision [--store file] --reviewer name --decisions 0:ACCEPT,1:RETURN [--reason text] <revision-id>")
+		}
+		var decisions []jobs.ReviewDecision
+		for _, part := range strings.Split(*decisionsFlag, ",") {
+			pair := strings.SplitN(strings.TrimSpace(part), ":", 2)
+			if len(pair) != 2 {
+				return fmt.Errorf("invalid decision %q, expected index:ACCEPT|RETURN", part)
+			}
+			var index int
+			if _, err := fmt.Sscanf(strings.TrimSpace(pair[0]), "%d", &index); err != nil {
+				return err
+			}
+			kind := jobs.DecisionKind(strings.ToUpper(strings.TrimSpace(pair[1])))
+			if kind != jobs.DecisionAccept && kind != jobs.DecisionReturn {
+				return fmt.Errorf("invalid decision kind %q", pair[1])
+			}
+			decisions = append(decisions, jobs.ReviewDecision{Index: index, Kind: kind, Reason: *reason})
+		}
+		store, err := jobs.OpenStore(*cmdStore)
+		if err != nil {
+			return err
+		}
+		defer store.Close()
+		report, err := jobs.NewManager(store, registry).ReviewRevision(cmdFlags.Arg(0), *reviewer, decisions)
+		if err != nil {
+			return err
+		}
+		return printJSON(report)
 	case "resolve-pending":
 		cmdFlags := flag.NewFlagSet("resolve-pending", flag.ContinueOnError)
 		cmdStore := cmdFlags.String("store", storePath, "job state file")
@@ -330,5 +368,5 @@ func extractGlobalStore(args []string, storePath *string) ([]string, error) {
 }
 
 func usage() {
-	fmt.Println(`commands: types, enqueue, list, show, cancel, cancel-group, recover, worker, revisions, propose-revision, preview-revision, show-revision, confirm-revision, cancel-revision, resolve-pending, compare-revision`)
+	fmt.Println(`commands: types, enqueue, list, show, cancel, cancel-group, recover, worker, revisions, propose-revision, preview-revision, show-revision, confirm-revision, cancel-revision, review-revision, resolve-pending, compare-revision`)
 }

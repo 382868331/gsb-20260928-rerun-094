@@ -21,6 +21,9 @@ var (
 	ErrStaleGeneration   = errors.New("revision targets an outdated generation")
 	ErrRevisionClosed    = errors.New("revision is no longer open")
 	ErrChangeNotOpen     = errors.New("change is not open")
+	ErrReviewerMismatch  = errors.New("reviewer is not assigned to this change")
+	ErrReviewerRequired  = errors.New("assigned change requires a named reviewer")
+	ErrReviewConflict    = errors.New("change already carries an effective different decision")
 )
 
 type Manager struct {

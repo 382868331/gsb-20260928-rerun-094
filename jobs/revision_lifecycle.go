@@ -7,37 +7,22 @@ import (
 )
 
 func (m *Manager) CancelRevision(revisionID string, cancelIndexes []int) (*RevisionCandidate, error) {
-	now := m.now()
-	err := m.store.MutateAll(func(view *SnapshotView) error {
-		candidate, ok := view.Revisions()[revisionID]
-		if !ok {
-			return fmt.Errorf("%w: %s", ErrNotFound, revisionID)
+	var decisions map[int]changeDecision
+	if cancelIndexes != nil {
+		if len(cancelIndexes) == 0 {
+			return nil, fmt.Errorf("at least one change index is required")
 		}
-		if candidate.Status == RevisionCanceled {
-			return fmt.Errorf("%w: revision %s was canceled", ErrRevisionClosed, revisionID)
-		}
-		selected, err := selectedIndexes(cancelIndexes, len(candidate.Changes))
-		if err != nil {
-			return err
-		}
-		for idx := range selected {
-			change := candidate.Changes[idx]
-			if change.Status != ChangeProposed {
-				return fmt.Errorf("%w: change %d is %s", ErrChangeNotOpen, idx, change.Status)
+		seen := map[int]bool{}
+		decisions = make(map[int]changeDecision, len(cancelIndexes))
+		for _, idx := range cancelIndexes {
+			if seen[idx] {
+				return nil, fmt.Errorf("duplicate change index %d", idx)
 			}
-			change.Status = ChangeCanceled
-			for _, pending := range candidate.Pending {
-				if pending.ChangeKey == idx && pending.Status == PendingOpen {
-					pending.Status = PendingDismissed
-					pending.Resolution = "change canceled before confirmation"
-					pending.ResolvedAt = &now
-				}
-			}
+			seen[idx] = true
+			decisions[idx] = changeDecision{kind: DecisionCancel}
 		}
-		closeRevisionIfComplete(candidate, now)
-		return nil
-	})
-	if err != nil {
+	}
+	if _, err := m.applyRevisionDecisions(revisionID, decisions, DecisionCancel); err != nil {
 		return nil, err
 	}
 	return m.GetRevision(revisionID)
@@ -130,6 +115,9 @@ func (m *Manager) CompareRevision(revisionID string) (*RevisionComparison, error
 
 func selectedIndexes(indexes []int, length int) (map[int]bool, error) {
 	if indexes == nil {
+		if length < 0 {
+			return nil, nil
+		}
 		selected := make(map[int]bool, length)
 		for i := 0; i < length; i++ {
 			selected[i] = true
