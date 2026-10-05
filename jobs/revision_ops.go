@@ -10,6 +10,9 @@ type ChangeSpec struct {
 	JobID     string
 	Kind      ChangeKind
 	NewResult string
+	// Reviewer assigns the change to a named reviewer. Assigned changes can
+	// only be decided through ReviewChange by that reviewer.
+	Reviewer string
 	// ExternalEffects lists unverified external effects that the change may
 	// trigger. Each entry becomes an OPEN pending item on confirmation.
 	ExternalEffects []string
@@ -54,6 +57,7 @@ func (m *Manager) ProposeRevision(changes []ChangeSpec, note string) (*RevisionC
 				NewResult:      spec.NewResult,
 				Status:         ChangeProposed,
 				FromGeneration: job.Generation,
+				Assignee:       spec.Reviewer,
 			}
 			candidate.Changes = append(candidate.Changes, change)
 			for _, summary := range spec.ExternalEffects {

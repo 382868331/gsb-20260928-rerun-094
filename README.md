@@ -53,6 +53,15 @@ Go 实现的本地后台作业平台，包含作业定义、运行实例、持�
 
 候选可以携带尚未核实的外部效果。确认后对应作业保存 open pending item 并标记 external pending，相关下游保持等待；保存重开后状态仍在。人工核实后使用 `resolve-pending` 标记为 `CONFIRMED` 或 `DISMISSED`，相关分支才会继续派发。
 
+## 审核责任分工
+
+`ChangeSpec` 可携带 `Reviewer` 字段把变化分配给具体审核者。被分配的变化只能由该审核者通过 `review-revision` 决定，`confirm-revision` 对它们一律拒绝：
+
+- `review-revision --reviewer alice --decision accept --index 0 <revision-id>` 接受变化，效果等同单条确认：提升一代 artifact 并使下游失效重跑；`--decision reject` 把变化标记为 `REJECTED` 并驳回其待决外部事项，未获准的结果不会进入任何下游输入。
+- 每条变化保存完整审核轨迹 `reviews`：第一条提交是实际生效的决定（`effective: true`），之后同一变化的重复提交或交叉 verdict 仅追加审计记录（`effective: false`），不会重复提升产物代号，也不会改写已生效决定。
+- 审核者只能处理分配给自己的变化，越权提交返回 `ErrReviewerNotAssigned`；未分配的变化仍走原有 `confirm-revision` 流程。
+- 审核记录、历代 artifact、待决外部事项与执行记录全部持久化，保存重开后可继续处理其余变化。
+
 ## 使用
 
 ```bash
@@ -70,6 +79,7 @@ go run ./cmd/jobctl propose-revision --spec-file changes.json --note 'fix upstre
 go run ./cmd/jobctl preview-revision <revision-id>
 go run ./cmd/jobctl confirm-revision --indexes 0 <revision-id>
 go run ./cmd/jobctl cancel-revision --indexes 1 <revision-id>
+go run ./cmd/jobctl review-revision --reviewer alice --decision accept --index 0 <revision-id>
 go run ./cmd/jobctl resolve-pending --status CONFIRMED --resolution 'verified webhook' <pending-id>
 go run ./cmd/jobctl compare-revision <revision-id>
 go run ./cmd/jobctl recover
@@ -83,6 +93,7 @@ go run ./cmd/jobctl recover
     "JobID": "job-1-...",
     "Kind": "REPLACE",
     "NewResult": "echo:corrected",
+    "Reviewer": "alice",
     "ExternalEffects": ["verify that webhook idempotency key was used"]
   },
   {

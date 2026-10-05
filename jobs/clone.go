@@ -8,6 +8,7 @@ func cloneRevision(in *RevisionCandidate) *RevisionCandidate {
 	out.Changes = make([]*ArtifactChange, len(in.Changes))
 	for i := range in.Changes {
 		change := *in.Changes[i]
+		change.Reviews = append([]ReviewRecord(nil), in.Changes[i].Reviews...)
 		out.Changes[i] = &change
 	}
 	out.Pending = make([]*PendingItem, len(in.Pending))

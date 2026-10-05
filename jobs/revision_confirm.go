@@ -39,50 +39,11 @@ func (m *Manager) ConfirmRevision(revisionID string, acceptIndexes []int) (*Conf
 			if acceptIndexes != nil && !want[i] {
 				continue
 			}
-			if change.Status != ChangeProposed {
-				return fmt.Errorf("%w: change %d is %s", ErrChangeNotOpen, i, change.Status)
+			if change.Assignee != "" {
+				return fmt.Errorf("%w: change %d is assigned to %s; use review", ErrReviewerNotAssigned, i, change.Assignee)
 			}
-			job := all[change.JobID]
-			if job.Status != StatusSucceeded || job.ArtifactState != ArtifactActive {
-				return fmt.Errorf("%w: %s is %s/%s", ErrNotSucceeded, change.JobID, job.Status, job.ArtifactState)
-			}
-			if job.Generation != change.FromGeneration {
-				return fmt.Errorf("%w: change %d targets gen %d but %s is now gen %d", ErrStaleGeneration, i, change.FromGeneration, change.JobID, job.Generation)
-			}
-			change.Status = ChangeAccepted
-			change.ToGeneration = job.Generation
-			unchanged := change.Kind == ChangeReplace && change.NewResult == job.Result
-			if unchanged {
-				change.Status = ChangeNoChange
-				change.Unchanged = true
-				report.Unchanged = append(report.Unchanged, i)
-				continue
-			}
-			report.Accepted = append(report.Accepted, i)
-			if change.Kind == ChangeReplace {
-				newGen := applyReplace(job, change, candidate.ID, now)
-				change.ToGeneration = newGen
-				report.NewGenerations[job.ID] = newGen
-			} else {
-				applyRevoke(job, candidate.ID, now)
-			}
-			hasPending := false
-			for _, pending := range candidate.Pending {
-				if pending.ChangeKey == i && pending.Status == PendingOpen {
-					hasPending = true
-					report.PendingOpen = append(report.PendingOpen, pending.ID)
-					job.ExternalPendingIDs = append(job.ExternalPendingIDs, pending.ID)
-				}
-			}
-			job.ExternalPendingIDs = uniqueStrings(job.ExternalPendingIDs)
-			if len(job.ExternalPendingIDs) > 0 && change.Kind == ChangeReplace {
-				job.ExternalPending = true
-			} else if !hasPending {
-				job.ExternalPending = false
-			}
-			propagateInvalidation(change, candidate, job, dependents, all, view, invalidatedSet, reusableSet, now)
-			if hasPending {
-				collectPendingBranches(job.ID, dependents, all, report)
+			if err := confirmChange(view, candidate, change, i, all, dependents, report, invalidatedSet, reusableSet, now); err != nil {
+				return err
 			}
 		}
 		candidate.UpdatedAt = now
@@ -106,6 +67,58 @@ func (m *Manager) ConfirmRevision(revisionID string, acceptIndexes []int) (*Conf
 		return nil, err
 	}
 	return report, nil
+}
+
+// confirmChange applies one proposed change: it promotes the artifact
+// generation (or revokes it), opens pending items, and propagates
+// invalidation downstream. Shared by ConfirmRevision and ReviewChange.
+func confirmChange(view *SnapshotView, candidate *RevisionCandidate, change *ArtifactChange, index int, all map[string]*Job, dependents map[string][]string, report *ConfirmationReport, invalidatedSet, reusableSet map[string]bool, now time.Time) error {
+	if change.Status != ChangeProposed {
+		return fmt.Errorf("%w: change %d is %s", ErrChangeNotOpen, index, change.Status)
+	}
+	job := all[change.JobID]
+	if job.Status != StatusSucceeded || job.ArtifactState != ArtifactActive {
+		return fmt.Errorf("%w: %s is %s/%s", ErrNotSucceeded, change.JobID, job.Status, job.ArtifactState)
+	}
+	if job.Generation != change.FromGeneration {
+		return fmt.Errorf("%w: change %d targets gen %d but %s is now gen %d", ErrStaleGeneration, index, change.FromGeneration, change.JobID, job.Generation)
+	}
+	change.Status = ChangeAccepted
+	change.ToGeneration = job.Generation
+	unchanged := change.Kind == ChangeReplace && change.NewResult == job.Result
+	if unchanged {
+		change.Status = ChangeNoChange
+		change.Unchanged = true
+		report.Unchanged = append(report.Unchanged, index)
+		return nil
+	}
+	report.Accepted = append(report.Accepted, index)
+	if change.Kind == ChangeReplace {
+		newGen := applyReplace(job, change, candidate.ID, now)
+		change.ToGeneration = newGen
+		report.NewGenerations[job.ID] = newGen
+	} else {
+		applyRevoke(job, candidate.ID, now)
+	}
+	hasPending := false
+	for _, pending := range candidate.Pending {
+		if pending.ChangeKey == index && pending.Status == PendingOpen {
+			hasPending = true
+			report.PendingOpen = append(report.PendingOpen, pending.ID)
+			job.ExternalPendingIDs = append(job.ExternalPendingIDs, pending.ID)
+		}
+	}
+	job.ExternalPendingIDs = uniqueStrings(job.ExternalPendingIDs)
+	if len(job.ExternalPendingIDs) > 0 && change.Kind == ChangeReplace {
+		job.ExternalPending = true
+	} else if !hasPending {
+		job.ExternalPending = false
+	}
+	propagateInvalidation(change, candidate, job, dependents, all, view, invalidatedSet, reusableSet, now)
+	if hasPending {
+		collectPendingBranches(job.ID, dependents, all, report)
+	}
+	return nil
 }
 
 func collectPendingBranches(rootID string, dependents map[string][]string, all map[string]*Job, report *ConfirmationReport) {

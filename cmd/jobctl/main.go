@@ -251,6 +251,29 @@ func run(args []string) error {
 			return err
 		}
 		return printJSON(revision)
+	case "review-revision":
+		cmdFlags := flag.NewFlagSet("review-revision", flag.ContinueOnError)
+		cmdStore := cmdFlags.String("store", storePath, "job state file")
+		reviewer := cmdFlags.String("reviewer", "", "assigned reviewer name")
+		decision := cmdFlags.String("decision", "", "accept or reject")
+		index := cmdFlags.Int("index", -1, "zero-based change index")
+		note := cmdFlags.String("note", "", "review note")
+		if err := cmdFlags.Parse(rest); err != nil {
+			return err
+		}
+		if cmdFlags.NArg() != 1 || *index < 0 {
+			return fmt.Errorf("usage: jobctl review-revision [--store file] --reviewer name --decision accept|reject --index N [--note text] <revision-id>")
+		}
+		store, err := jobs.OpenStore(*cmdStore)
+		if err != nil {
+			return err
+		}
+		defer store.Close()
+		report, err := jobs.NewManager(store, registry).ReviewChange(cmdFlags.Arg(0), *index, *reviewer, jobs.ReviewDecision(strings.ToUpper(*decision)), *note)
+		if err != nil {
+			return err
+		}
+		return printJSON(report)
 	case "resolve-pending":
 		cmdFlags := flag.NewFlagSet("resolve-pending", flag.ContinueOnError)
 		cmdStore := cmdFlags.String("store", storePath, "job state file")
@@ -330,5 +353,5 @@ func extractGlobalStore(args []string, storePath *string) ([]string, error) {
 }
 
 func usage() {
-	fmt.Println(`commands: types, enqueue, list, show, cancel, cancel-group, recover, worker, revisions, propose-revision, preview-revision, show-revision, confirm-revision, cancel-revision, resolve-pending, compare-revision`)
+	fmt.Println(`commands: types, enqueue, list, show, cancel, cancel-group, recover, worker, revisions, propose-revision, preview-revision, show-revision, confirm-revision, cancel-revision, review-revision, resolve-pending, compare-revision`)
 }

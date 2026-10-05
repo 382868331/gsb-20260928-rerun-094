@@ -21,6 +21,9 @@ var (
 	ErrStaleGeneration   = errors.New("revision targets an outdated generation")
 	ErrRevisionClosed    = errors.New("revision is no longer open")
 	ErrChangeNotOpen     = errors.New("change is not open")
+	// ErrReviewerNotAssigned is returned when a reviewer tries to decide a
+	// change that is assigned to someone else (or to nobody).
+	ErrReviewerNotAssigned = errors.New("change is assigned to a different reviewer")
 )
 
 type Manager struct {

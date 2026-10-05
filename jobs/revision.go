@@ -43,12 +43,38 @@ const (
 	PendingDismissed PendingStatus = "DISMISSED"
 )
 
+// ReviewDecision is the verdict a reviewer records for one assigned change.
+type ReviewDecision string
+
+const (
+	ReviewAccept ReviewDecision = "ACCEPT"
+	ReviewReject ReviewDecision = "REJECT"
+)
+
+// ReviewRecord is one submitted review action. Only the first submission on
+// an open change is effective; later duplicate or cross submissions are kept
+// for audit with Effective=false and never mutate artifacts again.
+type ReviewRecord struct {
+	Reviewer   string         `json:"reviewer"`
+	Decision   ReviewDecision `json:"decision"`
+	Effective  bool           `json:"effective"`
+	Note       string         `json:"note,omitempty"`
+	RecordedAt time.Time      `json:"recorded_at"`
+}
+
 // ArtifactChange is one proposed replacement or revocation.
 type ArtifactChange struct {
 	JobID     string       `json:"job_id"`
 	Kind      ChangeKind   `json:"kind"`
 	NewResult string       `json:"new_result,omitempty"`
 	Status    ChangeStatus `json:"status"`
+	// Assignee is the reviewer responsible for this change. Only the assignee
+	// may review it; unassigned changes stay confirmable via ConfirmRevision.
+	Assignee string `json:"assignee,omitempty"`
+	// Reviews is the audit trail of review actions submitted for this change.
+	// The record with Effective=true is the decision that actually took
+	// effect; everything later is a kept but inert duplicate or cross verdict.
+	Reviews []ReviewRecord `json:"reviews,omitempty"`
 	// FromGeneration is the active generation when the change was proposed.
 	FromGeneration int `json:"from_generation"`
 	// ToGeneration is filled in once a replacement is confirmed.
